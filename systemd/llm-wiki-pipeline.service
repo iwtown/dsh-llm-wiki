@@ -1,0 +1,8 @@
+[Unit]
+Description=LLM-Wiki 后处理管线（lint + 索引 + 记忆体同步）
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node %h/bin/llm-wiki-pipeline.mjs --all
+UMask=077

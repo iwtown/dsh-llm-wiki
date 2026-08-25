@@ -1,0 +1,9 @@
+# 运行时产物（不上传）
+*.log
+pipeline-state.json
+sync-draft-*.json
+.dsh/
+node_modules/
+
+# 本机配置
+.env
