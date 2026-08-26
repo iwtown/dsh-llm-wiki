@@ -32,8 +32,8 @@ const STALE_DAYS = 90;
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 const DRY = args.has("--dry-run");
-const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory"].includes(a));
-const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), prune: doAll || args.has("--prune-memory") };
+const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory", "--dsh-export", "--docs-sync"].includes(a));
+const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), prune: doAll || args.has("--prune-memory"), dsh: doAll || args.has("--dsh-export"), docs: doAll || args.has("--docs-sync") };
 const RATE_TARGET = rawArgs[rawArgs.indexOf("--rate") + 1];
 const RATE_VALUE = rawArgs[rawArgs.indexOf("--rating") + 1];
 const DO_RATE = args.has("--rate") && RATE_TARGET && RATE_VALUE;
@@ -192,6 +192,142 @@ function okfAlign(pages) {
     }
   }
   return { aligned, updated };
+}
+
+// ── --dsh-export: 把 DSH 会话（~/.dsh/sessions/*/session-*/session.jsonl.zstd）导出为复盘 markdown 到 raw/sessions/dsh/
+// 幂等：state.exportedDsh 记录 {sessionId: mtime}；只导出 user 文本 + assistant 正文（不导出 reasoning/工具详情）
+const DSH_SESSIONS = join(homedir(), ".dsh/sessions");
+
+function buildSessionMd(sessionId, raw) {
+  const meta = { cwd: "", preset: "", createdAt: 0 };
+  const blocks = [];
+  let asstBuf = [];
+  let curTurn = -1;
+  const flush = () => {
+    if (asstBuf.length) {
+      const text = asstBuf.join("").trim();
+      if (text) blocks.push({ role: "assistant", text });
+      asstBuf = [];
+    }
+  };
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (!ev || typeof ev !== "object") continue;
+    if (ev.type === "session") {
+      meta.cwd = ev.cwd || ""; meta.preset = ev.agentPreset || ""; meta.createdAt = ev.createdAt || 0;
+    } else if (ev.type === "agent/inbox/spliced" && ev.data && Array.isArray(ev.data.inserted)) {
+      for (const ins of ev.data.inserted) {
+        if (ins.role === "user" && Array.isArray(ins.content)) {
+          const text = ins.content.map(c => (c && c.text) || "").join("").trim();
+          if (text) { flush(); blocks.push({ role: "user", text }); }
+        }
+      }
+    } else if (ev.type === "text-chunks" && ev.data && Array.isArray(ev.data.texts)) {
+      const turn = ev.data.turn || 0;
+      if (turn !== curTurn) { flush(); curTurn = turn; }
+      asstBuf.push(ev.data.texts.join(""));
+    }
+  }
+  flush();
+  const date = meta.createdAt ? new Date(meta.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const title = "DSH 会话复盘" + (meta.cwd ? "：" + String(meta.cwd).split("/").filter(Boolean).pop() : "");
+  let md = "---\ntitle: \"" + title + "\"\ntags: [dsh, session]\ntype: \"发现\"\ncreated: " + date + "\nsource: \"dsh:" + sessionId + "\"\n---\n\n# " + title + "\n\n- **会话**: " + sessionId + "\n- **工作目录**: " + (meta.cwd || "-") + "\n- **Agent 预设**: " + (meta.preset || "-") + "\n- **创建时间**: " + (meta.createdAt ? new Date(meta.createdAt).toISOString() : "-") + "\n- **消息块**: " + blocks.length + "\n\n## 对话记录\n\n";
+  for (const b of blocks) {
+    md += "### " + (b.role === "user" ? "用户" : "助手") + "\n\n" + b.text + "\n\n";
+  }
+  return md;
+}
+
+function dshSessionExport() {
+  const state = loadState();
+  const exported = state.exportedDsh || {};
+  const outDir = join(VAULT, "raw/sessions/dsh");
+  mkdirSync(outDir, { recursive: true });
+  let exportedNow = 0;
+  const results = [];
+  try {
+    for (const ws of readdirSync(DSH_SESSIONS)) {
+      const wsDir = join(DSH_SESSIONS, ws);
+      let sessionDirs;
+      try { if (!statSync(wsDir).isDirectory()) continue; sessionDirs = readdirSync(wsDir); } catch { continue; }
+      for (const sd of sessionDirs) {
+        if (!sd.startsWith("session-")) continue;
+        const sdir = join(wsDir, sd);
+        const zf = join(sdir, "session.jsonl.zstd");
+        try {
+          if (!statSync(sdir).isDirectory() || !existsSync(zf)) continue;
+          const st = statSync(zf);
+          if (exported[sd] === st.mtimeMs) continue;
+          const raw = execFileSync("zstd", ["-d", "-c", zf], { maxBuffer: 256 * 1024 * 1024, encoding: "utf8" });
+          const md = buildSessionMd(sd, raw);
+          const date = new Date(st.mtimeMs).toISOString().slice(0, 10);
+          const dest = join(outDir, date + "-" + sd.replace(/^session-/, "").slice(0, 8) + ".md");
+          writeFileSync(dest, md);
+          exported[sd] = st.mtimeMs;
+          exportedNow++;
+          results.push(sd.slice(0, 16));
+        } catch (e) { results.push(sd.slice(0, 16) + " ERR"); }
+      }
+    }
+    if (exportedNow > 0) saveState({ ...state, exportedDsh: exported });
+    return { exported: exportedNow, tracked: Object.keys(exported).length, results: results.slice(0, 6) };
+  } catch (e) { return { error: String(e.message || e).slice(0, 120) }; }
+}
+
+// ── --docs-sync: 把 mnemon Documents（~/.mnemon/documents/active/*.md）回流为 wiki 页
+// 幂等：state.docsImported 记录 {fileName: content_hash}；title 与已有 wiki 页重复则跳过
+const DOCS_DIR = join(homedir(), ".mnemon/documents/active");
+
+function docCategory(title) {
+  if (/计划|规划|方案|调研|决策|适配|评估/.test(title)) return "决策";
+  if (/接入|部署|配置|环境|发布|导航|优化/.test(title)) return "项目";
+  if (/准则|原则|规范|参考|收录/.test(title)) return "引用";
+  return "概念";
+}
+
+function docsSync() {
+  const state = loadState();
+  const imported = state.docsImported || {};
+  const results = [];
+  let importedNow = 0;
+  try {
+    if (!existsSync(DOCS_DIR)) return { error: "无 documents 目录" };
+    // 已有 wiki 页 title 规范化集（去重）
+    const existing = new Set();
+    for (const cat of ["决策","发现","概念","项目","流程","命令","规则","提示","记忆","基因","引用"]) {
+      const dir = join(WIKI, cat);
+      let files = [];
+      try { files = readdirSync(dir).filter(f => f.endsWith(".md") && f !== "index.md"); } catch { continue; }
+      for (const f of files) {
+        const t = parseFm(readFileSync(join(dir, f), "utf8")).title;
+        if (t) existing.add(String(t).replace(/\s+/g, ""));
+      }
+    }
+    for (const f of readdirSync(DOCS_DIR).filter(f => f.endsWith(".md")).sort()) {
+      const text = readFileSync(join(DOCS_DIR, f), "utf8");
+      const fm = parseFm(text);
+      if (!fm.id || !fm.title) continue;
+      if (imported[f] === fm.content_hash) continue;
+      const cat = docCategory(String(fm.title));
+      const normTitle = String(fm.title).replace(/\s+/g, "");
+      if (existing.has(normTitle)) { results.push(String(fm.title) + " SKIP(已有页)"); imported[f] = fm.content_hash; continue; }
+      const blk = extractFmText(text);
+      const body = blk ? text.slice(blk.end + 4).trim() : text.trim();
+      const date = String(fm.created_at || "").slice(0, 10) || new Date().toISOString().slice(0, 10);
+      const fname = String(fm.title).replace(/[\\/:*?"<>|]/g, "-").slice(0, 80);
+      const md = "---\ntitle: " + JSON.stringify(String(fm.title)) + "\ntags: [wiki/" + cat + ", compiled, mnemon]\ntype: \"" + cat + "\"\ncreated: " + date + "\nupdated: " + date + "\nsource: \"mnemon:document:" + fm.id + "\"\ndescription: " + (fm.description ? JSON.stringify(String(fm.description)) : "\"\"") + "\n---\n\n" + body + "\n\n## 相关\n\n- [[wiki/决策/llm-wiki-架构设计决策]]\n- [[wiki/概念/LLM-Wiki理念]]\n";
+      const dest = join(WIKI, cat, fname + ".md");
+      writeFileSync(dest, md);
+      imported[f] = fm.content_hash;
+      importedNow++;
+      existing.add(normTitle);
+      results.push(cat + "/" + fname);
+    }
+    if (importedNow > 0) saveState({ ...state, docsImported: imported });
+    return { imported: importedNow, results: results.slice(0, 12) };
+  } catch (e) { return { error: String(e.message || e).slice(0, 120) }; }
 }
 
 // ── --prune-memory: 清记忆体孤儿条目（来源指向不存在的 wiki 页）──
@@ -401,6 +537,16 @@ async function main() {
     console.log("\n== okf ==");
     if (DRY) console.log("(--dry-run) 将补 OKF v0.2 字段（description/sources/generated/stale_after）");
     else { const r = okfAlign(pages); console.log("OKF 对齐:", JSON.stringify(r)); summary.push("okf:" + (r.aligned || 0) + "页"); }
+  }
+  if (RUN.docs) {
+    console.log("\n== docs-sync ==");
+    if (DRY) console.log("(--dry-run) 将把 mnemon Documents 回流为 wiki 页");
+    else { const r = docsSync(); console.log("回流:", JSON.stringify(r)); summary.push("docs:" + (r.imported || 0) + "个"); }
+  }
+  if (RUN.dsh) {
+    console.log("\n== dsh-export ==");
+    if (DRY) console.log("(--dry-run) 将导出 DSH 会话复盘到 raw/sessions/dsh/");
+    else { const r = dshSessionExport(); console.log("导出:", JSON.stringify(r)); summary.push("dsh:" + (r.exported || 0) + "个"); }
   }
   if (RUN.prune) {
     console.log("\n== prune-memory ==");
