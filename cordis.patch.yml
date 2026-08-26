@@ -1,0 +1,4 @@
+# dsh-llm-wiki bundle patch：挂载生命周期插件（systemPrompt 注入 + session 自动管线）
+- insert:
+    - id: llm-wiki
+      name: dsh-llm-wiki

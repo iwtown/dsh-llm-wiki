@@ -37,13 +37,29 @@
 
 ## 安装
 
+**方式 A：bundle 包（推荐，含插件）**
+
 ```bash
-git clone https://github.com/<you>/dsh-llm-wiki.git
+dsh plugin --profile web add github:iwtown/dsh-llm-wiki
+```
+
+然后安装 SKILL / 管线 / systemd 服务（install.sh 只做这一步也行）：
+
+```bash
+git clone https://github.com/iwtown/dsh-llm-wiki.git
 cd dsh-llm-wiki && ./install.sh
 systemctl --user restart dsh-web   # 让插件生效
 ```
 
-`install.sh` 会把各组件复制到上述位置并启用 systemd 服务。然后：
+**方式 B：install.sh 全量本地部署**（插件为 profile 本地文件，零 npm/零 node_modules，最反脆弱）
+
+```bash
+git clone https://github.com/iwtown/dsh-llm-wiki.git
+cd dsh-llm-wiki && ./install.sh
+systemctl --user restart dsh-web
+```
+
+`install.sh` 会把各组件复制到标准位置并启用 systemd 服务。然后：
 
 1. **配置 vault 路径**：默认 /mnt/d/DB/Obsidian/LLM-Wiki（管线可用环境变量 LLM_WIKI_VAULT 覆盖；插件在 cordis.patch.yml 的 config.vault 覆盖；**SKILL 文件中的路径需按本机修改**）
 2. **首次记忆体同步**：`node ~/bin/llm-wiki-pipeline.mjs --sync`（把 wiki 精华导入 mnemon）
