@@ -32,16 +32,21 @@ const STALE_DAYS = 90;
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 const DRY = args.has("--dry-run");
-const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf"].includes(a));
-const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf") };
+const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory"].includes(a));
+const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), prune: doAll || args.has("--prune-memory") };
 const RATE_TARGET = rawArgs[rawArgs.indexOf("--rate") + 1];
 const RATE_VALUE = rawArgs[rawArgs.indexOf("--rating") + 1];
 const DO_RATE = args.has("--rate") && RATE_TARGET && RATE_VALUE;
 
-// frontmatter 定位（支持前置杂行）：返回第一个 --- 块的 fm 文本
+// frontmatter 定位（支持前置杂行）：返回第一个"行首"--- 块（防值内 --- 如 URL 误判）
 function extractFmText(content) {
-  const start = content.indexOf("---");
-  if (start < 0) return null;
+  let start;
+  if (content.startsWith("---")) start = 0;
+  else {
+    const m = content.match(/^---[\r\n]/m);
+    if (!m) return null;
+    start = m.index;
+  }
   const end = content.indexOf("\n---", start + 3);
   if (end < 0) return null;
   return { start, end, fm: content.slice(start + 3, end) };
@@ -156,6 +161,30 @@ function okfAlign(pages) {
   return { aligned, updated };
 }
 
+// ── --prune-memory: 清记忆体孤儿条目（来源指向不存在的 wiki 页）──
+function pruneMemory() {
+  let db;
+  try { db = new DatabaseSync(join(homedir(), ".mnemon/data/default/mnemon.db"), { readOnly: false }); }
+  catch (e) { return { error: "无法打开 mnemon db: " + e.message }; }
+  try {
+    const rows = db.prepare("SELECT id, content FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki/%");
+    let pruned = 0;
+    const gone = [];
+    for (const r of rows) {
+      const m = String(r.content).match(/来源: ([^）)]+)/);
+      if (!m) continue;
+      const rel = m[1].trim();
+      if (!existsSync(join(VAULT, rel))) {
+        // 软删（mnemon 的 deleted_at 机制）
+        db.prepare("UPDATE insights SET deleted_at = ? WHERE id = ?").run(new Date().toISOString(), r.id);
+        pruned++;
+        gone.push(rel);
+      }
+    }
+    return { scanned: rows.length, pruned, gone: gone.slice(0, 8) };
+  } finally { try { db.close(); } catch {} }
+}
+
 function parseFm(content) {
   const fm = {};
   const blk = extractFmText(content);
@@ -194,6 +223,13 @@ function lint(pages) {
   const issues = [];
   const links = new Map();
   for (const p of pages) {
+    // OKF 结构检查
+    const content = p.content;
+    if (!content.startsWith("---")) issues.push({ type: "okf", path: p.rel, message: "frontmatter 不在文件开头" });
+    else {
+      const closing = content.indexOf("\n---", 4);
+      if (closing < 0) issues.push({ type: "okf", path: p.rel, message: "frontmatter 无 closing ---" });
+    }
     for (const f of ["title", "type", "created"]) {
       if (!p.fm[f]) issues.push({ type: "missing_frontmatter", path: p.rel, message: "缺 " + f });
     }
@@ -332,6 +368,11 @@ async function main() {
     console.log("\n== okf ==");
     if (DRY) console.log("(--dry-run) 将补 OKF v0.2 字段（description/sources/generated/stale_after）");
     else { const r = okfAlign(pages); console.log("OKF 对齐:", JSON.stringify(r)); summary.push("okf:" + (r.aligned || 0) + "页"); }
+  }
+  if (RUN.prune) {
+    console.log("\n== prune-memory ==");
+    if (DRY) console.log("(--dry-run) 将软删来源指向不存在 wiki 页的记忆体条目");
+    else { const r = pruneMemory(); console.log("清理:", JSON.stringify(r)); summary.push("prune:" + (r.pruned || 0) + "条"); }
   }
   if (RUN.sync) {
     console.log("\n== sync ==");
