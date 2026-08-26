@@ -311,9 +311,9 @@ function changedPages(pages, state) {
 }
 function generateDraft(changed) {
   return changed.map(p => {
-    const summary = p.fm.summary && p.fm.summary !== "-" ? "：" + p.fm.summary : "";
+    const desc = (p.fm.description || p.fm.summary) && (p.fm.description || p.fm.summary) !== "-" ? "：" + (p.fm.description || p.fm.summary) : "";
     return {
-      content: "[LLM-Wiki/" + p.cat + "] " + (p.fm.title || p.file) + summary + "（来源: " + p.rel + "）",
+      content: "[LLM-Wiki/" + p.cat + "] " + (p.fm.title || p.file) + desc + "（来源: " + p.rel + "）",
       tags: ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : [])].filter(Boolean),
       importance: Number(p.fm.quality_score) >= 5 ? 4 : 3,
     };
