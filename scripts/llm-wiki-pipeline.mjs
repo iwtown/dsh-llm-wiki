@@ -117,7 +117,7 @@ function usageSync(pages) {
         if (content !== p.content) {
           const origMtime = p.mtime; // 恢复原 mtime：元数据回写不触发 sync 重新同步（utimesSync 用秒，mtimeMs 需 /1000）
           writeFileSync(p.full, content);
-          try { utimesSync(p.full, Math.floor(origMtime / 1000), Math.floor(origMtime / 1000)); } catch {}
+          try { utimesSync(p.full, origMtime / 1000, origMtime / 1000); } catch {}
           updated++;
         }
       }
@@ -187,7 +187,7 @@ function okfAlign(pages) {
       // 恢复原 mtime：--okf 是元数据规范化（记忆体条目用 summary 不含 description），不触发 sync 重新导入
       const origMtime = p.mtime;
       writeFileSync(p.full, content);
-      try { utimesSync(p.full, Math.floor(origMtime / 1000), Math.floor(origMtime / 1000)); } catch {}
+      try { utimesSync(p.full, origMtime / 1000, origMtime / 1000); } catch {}
       updated++; aligned++;
     }
   }
