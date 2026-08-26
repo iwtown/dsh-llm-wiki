@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-wiki",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Karpathy LLM Wiki 模式的 DSH 知识库系统：wiki-write/wiki-search SKILL + 零依赖管线 + mnemon 记忆体召回。",
   "type": "module",
   "main": "plugin/dsh-llm-wiki.mjs",

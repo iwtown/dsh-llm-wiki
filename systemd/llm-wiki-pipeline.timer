@@ -1,8 +1,8 @@
 [Unit]
-Description=LLM-Wiki 管线每日运行（03:00，避开 mnemon 备份 03:30）
+Description=LLM-Wiki 管线每日运行（10:00）
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 10:00:00
 Persistent=true
 RandomizedDelaySec=300
 
