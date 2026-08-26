@@ -32,8 +32,8 @@ const STALE_DAYS = 90;
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 const DRY = args.has("--dry-run");
-const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage"].includes(a));
-const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage") };
+const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf"].includes(a));
+const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf") };
 const RATE_TARGET = rawArgs[rawArgs.indexOf("--rate") + 1];
 const RATE_VALUE = rawArgs[rawArgs.indexOf("--rating") + 1];
 const DO_RATE = args.has("--rate") && RATE_TARGET && RATE_VALUE;
@@ -53,7 +53,7 @@ function setFmField(content, field, value) {
   if (!blk) return content;
   const re = new RegExp("^" + field + ":.*$", "m");
   const newFm = re.test(blk.fm) ? blk.fm.replace(re, field + ": " + value) : blk.fm + "\n" + field + ": " + value;
-  return content.slice(0, blk.start + 3) + newFm + content.slice(blk.end + 4);
+  return content.slice(0, blk.start + 3) + newFm + "\n---" + content.slice(blk.end + 4);
 }
 
 // --rate: 手动质量反馈（useful +1 分 / outdated 标 stale）
@@ -110,15 +110,50 @@ function usageSync(pages) {
         content = setFmField(content, "queried_count", u.count);
         if (u.last) content = setFmField(content, "last_queried", u.last);
         if (content !== p.content) {
-          const origMtime = p.mtime; // 恢复原 mtime：元数据回写不触发 sync 重新同步
+          const origMtime = p.mtime; // 恢复原 mtime：元数据回写不触发 sync 重新同步（utimesSync 用秒，mtimeMs 需 /1000）
           writeFileSync(p.full, content);
-          try { utimesSync(p.full, origMtime, origMtime); } catch {}
+          try { utimesSync(p.full, Math.floor(origMtime / 1000), Math.floor(origMtime / 1000)); } catch {}
           updated++;
         }
       }
     }
     return { tracked: rows.length, updated };
   } finally { try { db.close(); } catch {} }
+}
+
+// ── OKF v0.2 对齐：补 description/sources/generated/stale_after（幂等，只补缺字段）──
+function okfAlign(pages) {
+  let updated = 0, aligned = 0;
+  for (const p of pages) {
+    if (p.cat === "索引") continue;
+    let content = p.content;
+    const fm = p.fm;
+    const today = new Date().toISOString().slice(0, 10);
+    // description：缺则从 summary 补
+    if (!fm.description && fm.summary && fm.summary !== "-") {
+      content = setFmField(content, "description", JSON.stringify(fm.summary));
+    }
+    // sources：有 source 单值 → 转 OKF sources 数组（保留原 source 兼容）
+    if (fm.source && !fm.sources) {
+      const res = /^https?:\/\//.test(fm.source) ? fm.source : fm.source;
+      content = setFmField(content, "sources", "[{ resource: " + JSON.stringify(res) + " }]");
+    }
+    // generated：补 by/at（at 用 created/updated 日期近似 ISO）
+    if (!fm.generated) {
+      const at = (fm.updated || fm.created || today) + "T00:00:00Z";
+      content = setFmField(content, "generated", "{ by: agent/dsh-llm-wiki, at: " + at + " }");
+    }
+    // stale_after：created/updated + 90 天
+    if (!fm.stale_after) {
+      const base = fm.updated || fm.created;
+      if (base) {
+        const d = new Date(base); d.setDate(d.getDate() + STALE_DAYS);
+        content = setFmField(content, "stale_after", d.toISOString().slice(0, 10) + "T00:00:00Z");
+      }
+    }
+    if (content !== p.content) { writeFileSync(p.full, content); updated++; aligned++; }
+  }
+  return { aligned, updated };
 }
 
 function parseFm(content) {
@@ -292,6 +327,11 @@ async function main() {
     console.log("\n== usage ==");
     if (DRY) console.log("(--dry-run) 将回写召回热度到 wiki 页 frontmatter");
     else { const r = usageSync(pages); console.log("回写:", JSON.stringify(r)); summary.push("usage:" + (r.updated || 0) + "页"); }
+  }
+  if (RUN.okf) {
+    console.log("\n== okf ==");
+    if (DRY) console.log("(--dry-run) 将补 OKF v0.2 字段（description/sources/generated/stale_after）");
+    else { const r = okfAlign(pages); console.log("OKF 对齐:", JSON.stringify(r)); summary.push("okf:" + (r.aligned || 0) + "页"); }
   }
   if (RUN.sync) {
     console.log("\n== sync ==");
