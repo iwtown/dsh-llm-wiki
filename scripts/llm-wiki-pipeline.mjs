@@ -134,9 +134,36 @@ function okfAlign(pages) {
     let content = p.content;
     const fm = p.fm;
     const today = new Date().toISOString().slice(0, 10);
-    // description：缺则从 summary 补
-    if (!fm.description && fm.summary && fm.summary !== "-") {
-      content = setFmField(content, "description", JSON.stringify(fm.summary));
+    // description：缺则从 summary 补；无 summary 则从正文首段提取（确定性摘要，幂等）
+    if (!fm.description) {
+      let desc = null;
+      if (fm.summary && fm.summary !== "-") desc = fm.summary;
+      else {
+        const blk = extractFmText(content);
+        if (blk) {
+          const lines = content.slice(blk.end + 4).split(String.fromCharCode(10));
+          let hIdx = -1;
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim().startsWith("#")) { hIdx = i; break; }
+          }
+          for (let i = hIdx + 1; i < lines.length; i++) {
+            let s = lines[i].trim();
+            if (s.length <= 10) continue;
+            if (s.startsWith("#") || s.startsWith("!") || s.startsWith("|")) continue;
+            if (s.startsWith("-") || s.startsWith("*") || s.charCodeAt(0) === 96) continue;
+            const c0 = s.charCodeAt(0), c1 = s[1];
+            if (c0 >= 48 && c0 <= 57 && (c1 === "." || c1 === ")" || c1 === "、")) continue;
+            // 引用块/信息卡片：剥离 "> " 前缀后作为候选（callout 头如 [!info] 跳过）
+            if (s.startsWith(">")) {
+              while (s.startsWith(">")) s = s.slice(1).trim();
+              if (!s || s.length <= 10 || s.startsWith("[")) continue;
+            }
+            desc = s.split(" ").filter(Boolean).join(" ").slice(0, 80);
+            break;
+          }
+        }
+      }
+      if (desc) content = setFmField(content, "description", JSON.stringify(desc));
     }
     // sources：有 source 单值 → 转 OKF sources 数组（保留原 source 兼容）
     if (fm.source && !fm.sources) {
@@ -156,7 +183,13 @@ function okfAlign(pages) {
         content = setFmField(content, "stale_after", d.toISOString().slice(0, 10) + "T00:00:00Z");
       }
     }
-    if (content !== p.content) { writeFileSync(p.full, content); updated++; aligned++; }
+    if (content !== p.content) {
+      // 恢复原 mtime：--okf 是元数据规范化（记忆体条目用 summary 不含 description），不触发 sync 重新导入
+      const origMtime = p.mtime;
+      writeFileSync(p.full, content);
+      try { utimesSync(p.full, Math.floor(origMtime / 1000), Math.floor(origMtime / 1000)); } catch {}
+      updated++; aligned++;
+    }
   }
   return { aligned, updated };
 }

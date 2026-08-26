@@ -5,7 +5,7 @@ description: 在 LLM-Wiki 知识库（/mnt/d/DB/Obsidian/LLM-Wiki）中检索知
 
 # LLM-Wiki 知识检索
 
-> LLM-Wiki 是 Karpathy 模式的 Obsidian 知识库（约 909 页，管线自动编译）。检索纪律：**先搜索、后精读、引用原文路径，禁止凭记忆编造知识库内容**。
+> LLM-Wiki 是 Karpathy 模式的 Obsidian 知识库（866 页，管线自动编译）。检索纪律：**先搜索、后精读、引用原文路径，禁止凭记忆编造知识库内容**。
 
 ## 库结构（12 分类，根：/mnt/d/DB/Obsidian/LLM-Wiki/wiki/）
 
@@ -24,9 +24,9 @@ description: 在 LLM-Wiki 知识库（/mnt/d/DB/Obsidian/LLM-Wiki）中检索知
 2. **关键词搜索**：在 vault 根目录执行 `rg -l "<关键词>" wiki/ --glob "*.md"`。
    - 中文关键词直接搜；多主题用 `rg -l "A|B"`；排除 `_archived`、`trash` 目录。
    - 结果按目录顺序返回，模型自行判断相关度（标题通常即主题）。
-3. **精读原文**：命中后 `read` 目标文件。带 frontmatter（title/related/quality_score 等）为编译页。
+3. **精读原文**：命中后 `read` 目标文件。**先读 frontmatter 预判**（前 20 行）：`type` 页面类型、`description` 摘要、`related` 关联页、`stale_after`/`status` 新鲜度——不相关或已过时（当前日期 > stale_after 或 status: stale）直接跳过，相关再全文精读，避免无效精读。
 4. **行级定位**：需要定位时 `rg -n "<关键词>" <文件>` 获取行号与内容。
-5. **引用**：回答时给出 wiki 页面相对路径（如 `wiki/决策/子代理模型选型与分配.md`）；引用剪藏页时给原始链接（frontmatter 的 source 或正文 Read Original 链接）。
+5. **引用**：回答时给出 wiki 页面相对路径（如 `wiki/决策/子代理模型选型与分配.md`）；溯源优先用 frontmatter 的 `sources` 字段（OKF 规范，含原始资源路径/链接），缺失时回退正文 Read Original 链接。
 
 ## 失败处理
 
@@ -37,6 +37,7 @@ description: 在 LLM-Wiki 知识库（/mnt/d/DB/Obsidian/LLM-Wiki）中检索知
 | 用户问的是偏好/协作规则 | 优先查热记忆（MEMORY.md）而非 wiki |
 | 深度语义（"之前聊过的 X"） | 用 mnemon_recall（记忆体召回） |
 | 页面有用/已过时 | 用 `node ~/bin/llm-wiki-pipeline.mjs --rate <路径> --rating useful|outdated` 反馈（驱动 quality_score 闭环） |
+| 命中页已过时（stale_after 已过 / status: stale） | 引用时明确标注可能过时，优先找相关新页面或按 sources 字段回原始来源核实 |
 
 ## 写入纪律（产出侧协作）
 
