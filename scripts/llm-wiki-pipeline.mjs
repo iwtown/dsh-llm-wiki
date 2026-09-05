@@ -33,7 +33,7 @@ const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 const DRY = args.has("--dry-run");
 const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory", "--dsh-export", "--docs-sync"].includes(a));
-const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), prune: doAll || args.has("--prune-memory"), dsh: doAll || args.has("--dsh-export"), docs: doAll || args.has("--docs-sync") };
+const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), compilePatterns: doAll || args.has("--compile-patterns"), prune: doAll || args.has("--prune-memory"), dsh: doAll || args.has("--dsh-export"), docs: doAll || args.has("--docs-sync") };
 const RATE_TARGET = rawArgs[rawArgs.indexOf("--rate") + 1];
 const RATE_VALUE = rawArgs[rawArgs.indexOf("--rating") + 1];
 const DO_RATE = args.has("--rate") && RATE_TARGET && RATE_VALUE;
@@ -175,6 +175,11 @@ function okfAlign(pages) {
       const at = (fm.updated || fm.created || today) + "T00:00:00Z";
       content = setFmField(content, "generated", "{ by: agent/dsh-llm-wiki, at: " + at + " }");
     }
+    // verified：quality_score >= 4 且无 verified 时，自动标记 agent verified
+    if (!fm.verified && Number(fm.quality_score) >= 4) {
+      const at = (fm.updated || fm.created || today) + "T00:00:00Z";
+      content = setFmField(content, "verified", "{ by: agent/dsh-llm-wiki, at: " + at + " }");
+    }
     // stale_after：created/updated + 90 天
     if (!fm.stale_after) {
       const base = fm.updated || fm.created;
@@ -192,6 +197,116 @@ function okfAlign(pages) {
     }
   }
   return { aligned, updated };
+}
+
+
+
+
+
+
+
+
+// --compile-patterns: 扫描孤立节点，聚类高频主题，生成 wiki/patterns/ 页面
+function compilePatterns(pages) {
+  const patternsDir = join(WIKI, "patterns");
+  const evolutionDir = join(WIKI, "evolution");
+  const logsFile = join(evolutionDir, "logs.md");
+  mkdirSync(patternsDir, { recursive: true });
+  mkdirSync(evolutionDir, { recursive: true });
+  const orphanPages = [];
+  for (const pg of pages) {
+    if (pg.cat === "索引") continue;
+    const body = pg.content.slice(pg.fmEnd + 4);
+    const linkCount = (body.match(/\[\[/g) || []).length;
+    if (linkCount === 0) orphanPages.push(pg);
+  }
+  const byType = {};
+  for (const pg of orphanPages) {
+    const t = pg.fm.type || "unknown";
+    if (!byType[t]) byType[t] = [];
+    byType[t].push(pg);
+  }
+  const created = [];
+  const today = new Date().toISOString().slice(0, 10);
+  const logEntries = [];
+  for (const [typ, ps] of Object.entries(byType)) {
+    if (ps.length < 2) continue;
+    const keywords = new Map();
+    for (const pg of ps) {
+      const title = pg.fm.title || pg.rel;
+      const words = title.match(/[\u4e00-\u9fff]{2,4}/g) || [];
+      for (const w of words) keywords.set(w, (keywords.get(w) || 0) + 1);
+    }
+    const topKeywords = [...keywords.entries()].filter(([, cnt]) => cnt >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([w]) => w);
+    if (topKeywords.length === 0) continue;
+    const patternName = topKeywords[0] + "-pattern";
+    const patternFile = join(patternsDir, patternName + ".md");
+    if (existsSync(patternFile)) {
+      let existing = readFileSync(patternFile, "utf8");
+      const appendLine = ps.map(pp => "- [[" + pp.rel + "]]（" + (pp.fm.created || today) + "）").join("\n");
+      const insertAfter = existing.indexOf("## 出现记录\n");
+      if (insertAfter >= 0) {
+        const insertAt = existing.indexOf("\n", insertAfter) + 1;
+        existing = existing.slice(0, insertAt) + appendLine + "\n" + existing.slice(insertAt);
+      }
+      existing = existing.replace(/^updated: .+$/m, "updated: " + today);
+      writeFileSync(patternFile, existing);
+      logEntries.push("* **Pattern 更新**: [[wiki/patterns/" + patternName + "]] \u2014 追加 " + ps.length + " 条新证据");
+    } else {
+      const rl = ps.slice(0, 3).map(pp => "  - \"[[" + pp.rel + "]]\"").join("\n");
+      const ar = ps.map(pp => "- [[" + pp.rel + "]]（" + (pp.fm.created || today) + "）").join("\n");
+      const parts = [
+        "---",
+        'title: "' + topKeywords[0] + ' 模式"',
+        "tags: [wiki/patterns, compiled, pattern]",
+        'type: "pattern"',
+        "created: " + today,
+        "updated: " + today,
+        "status: active",
+        "related:",
+        rl,
+        "cssclasses: [pattern]",
+        "---",
+        "",
+        "# " + topKeywords[0] + " 模式",
+        "",
+        "## 问题描述",
+        "<该模式在 " + ps.length + " 个孤立页面中出现>",
+        "",
+        "## 根因",
+        "<待分析>",
+        "",
+        "## 解决方案",
+        "<待补充>",
+        "",
+        "## 出现记录",
+        ar,
+        "",
+        "## 衍生技能",
+        "- --",
+      ];
+      writeFileSync(patternFile, parts.join("\n"));
+      created.push(patternName);
+      logEntries.push("* **Pattern 新增**: [[wiki/patterns/" + patternName + "]] \u2014 从 " + ps.length + " 个 " + typ + " 孤立页聚类（关键词: " + topKeywords.join(", ") + "）");
+    }
+  }
+  if (logEntries.length > 0) {
+    // 幂等：检查是否已有今天的相同条目
+    const existing = existsSync(logsFile) ? readFileSync(logsFile, "utf8") : "";
+    const dupCheck = logEntries.every(e => !existing.includes(e));
+    if (!dupCheck) { console.log("(--dry-run) 跳过重复日志条目"); return { created: created.length, orphans: orphanPages.length, patterns: created, skipped: "log" }; }
+    let lc = "# 编译日志（Evolution Log）\n\n> 记录 wiki/patterns/ 的编译、合并、归档事件。\n> 格式：* **<类型>**: <详情>\n\n";
+    if (existsSync(logsFile)) {
+      const el = readFileSync(logsFile, "utf8");
+      const ip = el.indexOf("## " + today + "\n");
+      if (ip >= 0) {
+        const nn = el.indexOf("\n", ip);
+        lc = el.slice(0, nn + 1) + "\n" + logEntries.join("\n") + "\n" + el.slice(nn + 1);
+      } else { lc += "## " + today + "\n" + logEntries.join("\n") + "\n"; }
+    } else { lc += "## " + today + "\n" + logEntries.join("\n") + "\n"; }
+    writeFileSync(logsFile, lc);
+  }
+  return { created: created.length, orphans: orphanPages.length, patterns: created };
 }
 
 // ── --dsh-export: 把 DSH 会话（~/.dsh/sessions/*/session-*/session.jsonl.zstd）导出为复盘 markdown 到 raw/sessions/dsh/
@@ -537,6 +652,11 @@ async function main() {
     console.log("\n== okf ==");
     if (DRY) console.log("(--dry-run) 将补 OKF v0.2 字段（description/sources/generated/stale_after）");
     else { const r = okfAlign(pages); console.log("OKF 对齐:", JSON.stringify(r)); summary.push("okf:" + (r.aligned || 0) + "页"); }
+  }
+  if (RUN.compilePatterns) {
+    console.log("\n== compile-patterns ==");
+    if (DRY) console.log("(--dry-run) 将扫描孤立节点并生成 pattern 页");
+    else { const r = compilePatterns(pages); console.log("编译:", JSON.stringify(r)); summary.push("compile:" + (r.created || 0) + "pattern/"); }
   }
   if (RUN.docs) {
     console.log("\n== docs-sync ==");
