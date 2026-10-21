@@ -625,13 +625,22 @@ function saveState(s) { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync
 function changedPages(pages, state) {
   return pages.filter(p => { const st = state[p.rel]; return !st || st.mtime !== p.mtime; });
 }
+// wiki 分类 -> mnemon category（导入时写入，否则全部落到 general，召回/gc 无区分度）
+const MNEMON_CATEGORY = { 决策: "decision", 规则: "decision", 发现: "insight", 项目: "fact", 概念: "fact", 流程: "fact", 命令: "fact", 提示: "insight", 记忆: "context", 引用: "general", 基因: "fact" };
+// wiki 分类 -> mnemon importance（gc 阈值 0.5，importance<=2 才会被建议清理）
+const MNEMON_IMPORTANCE = { 规则: 5, 决策: 4, 项目: 3, 发现: 3, 概念: 3, 流程: 3, 命令: 3, 提示: 2, 记忆: 2, 引用: 2, 基因: 3 };
 function generateDraft(changed) {
   return changed.map(p => {
     const desc = (p.fm.description || p.fm.summary) && (p.fm.description || p.fm.summary) !== "-" ? "：" + (p.fm.description || p.fm.summary) : "";
+    // 不再加 "[LLM-Wiki/<cat>]" 前缀：它让 "LLM" 成为所有记忆的公共实体，把实体图连成 clique
+    // 实体只放业务实体（project），不要把分类名当实体：否则"发现/决策"会变成新的大团
+    const entities = [p.fm.project].filter(v => v && v !== "-");
     return {
-      content: "[LLM-Wiki/" + p.cat + "] " + (p.fm.title || p.file) + desc + "（来源: " + p.rel + "）",
+      content: (p.fm.title || p.file) + desc + "（来源: " + p.rel + "）",
+      category: MNEMON_CATEGORY[p.cat] || "general",
+      importance: MNEMON_IMPORTANCE[p.cat] ?? (Number(p.fm.quality_score) >= 5 ? 4 : 3),
       tags: ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : [])].filter(Boolean),
-      importance: Number(p.fm.quality_score) >= 5 ? 4 : 3,
+      entities,
     };
   });
 }
