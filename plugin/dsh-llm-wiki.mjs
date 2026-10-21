@@ -12,6 +12,7 @@
  *  vault:        vault 路径（默认按平台：Windows D:\DB\Obsidian\LLM-Wiki，其他 /mnt/d/DB/Obsidian/LLM-Wiki）
  *  previewOrder: 知识预览 section 顺序（默认 138）
  *  rulesOrder:   守则 section 顺序（默认 139）
+ *  mainAgentOnly: 只给主 Agent 注入知识库（默认 true；spawn/fork 出来的子代理不加载）
  *
  * 跨平台说明：
  *  - 管线位置由 $DSH_HOME 推导（Windows 桌面版为 C:\Users\<user>\.dsh\bin\llm-wiki-pipeline.mjs），
@@ -55,6 +56,22 @@ export function apply(ctx, config = {}) {
   const previewFile = join(vault, "wiki", "index.md");
   const readRules = cached(rulesFile);
   const readPreview = cached(previewFile);
+  // 只给主 Agent 注入：子代理（记忆任务 Agent 等）不加载 6KB 知识库，
+  // 既省 token，也避免守则干扰子代理自己的专用协议。
+  // 判定用 agents.roots()（无 owner 的顶层 agent）；取不到服务时退回旧行为。
+  const mainAgentOnly = config.mainAgentOnly !== false;
+  const isMainAgent = (context) => {
+    if (!mainAgentOnly) return true;
+    const agent = context && context.agent;
+    if (!agent) return true;
+    try {
+      const agents = ctx.get("agents");
+      if (!agents || typeof agents.roots !== "function") return true;
+      const roots = agents.roots();
+      if (roots.length === 0) return true;
+      return roots.some((item) => item.id === agent.id);
+    } catch { return true; }
+  };
   try { console.log("[dsh-llm-wiki] apply() vault=" + vault + " rules=" + existsSync(rulesFile) + " preview=" + existsSync(previewFile) + " pipeline=" + existsSync(PIPELINE)); } catch {}
 
   // ── 1) systemPrompt 注入 ──
@@ -62,7 +79,8 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.systemPrompt.section({
     name: "llm-wiki:preview",
     order: previewOrder,
-    text: () => {
+    text: (context) => {
+      if (!isMainAgent(context)) return "";
       const idx = readPreview();
       if (!idx) return "";
       return "\n---\n# LLM-Wiki 知识库（管线自动维护）\n\n" + idx + "\n---\n";
@@ -73,7 +91,8 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.systemPrompt.section({
     name: "llm-wiki:rules",
     order: rulesOrder,
-    text: () => {
+    text: (context) => {
+      if (!isMainAgent(context)) return "";
       const schema = readRules();
       if (!schema) return "";
       return "\n---\n# LLM-Wiki 知识库运行规则\n\n" + schema + "\n---\n";
@@ -113,7 +132,14 @@ export function apply(ctx, config = {}) {
     child.unref();
   };
 
-  ctx.on("session/disposed", () => {
+  // 子代理（记忆写入/审查等）结束不需要跑整条管线，避免一次写入触发全量 --all。
+  const isSubSession = (session) => {
+    if (!session || typeof session !== "object") return false;
+    const header = session.header || session.meta || session;
+    return header.origin === "subagent" || header.parentSession !== undefined;
+  };
+  ctx.on("session/disposed", (session) => {
+    if (isSubSession(session)) return;
     try { runPipeline(); } catch (e) { try { console.log("[dsh-llm-wiki] hook error: " + e.message); } catch {} }
   });
 }
