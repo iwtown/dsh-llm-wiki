@@ -123,18 +123,27 @@ function ratePage(rel, rating) {
   return { error: "rating 必须是 useful 或 outdated" };
 }
 
+/** 从记忆体条目正文提取 wiki 相对路径：rel 在 "来源: " 之后、结尾右括号之前，路径本身可能含括号。 */
+function parseSourceRel(content) {
+  const s = String(content);
+  const idx = s.lastIndexOf("来源: ");
+  if (idx < 0) return null;
+  const rel = s.slice(idx + 4).replace(/[）)]\s*$/, "").trim();
+  return rel || null;
+}
+
 // --usage: 从 mnemon 记忆体提取召回热度，回写 queried_count/last_queried
 function usageSync(pages) {
   let db;
   try { db = new DatabaseSync(join(homedir(), ".mnemon/data/default/mnemon.db"), { readOnly: true }); }
   catch (e) { return { error: "无法打开 mnemon db: " + e.message }; }
   try {
-    const rows = db.prepare("SELECT content, access_count, last_accessed_at FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki/%");
+    // 路径分隔符随平台变化（Windows 为反斜杠），只匹配 "来源: wiki" 前缀
+    const rows = db.prepare("SELECT content, access_count, last_accessed_at FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki%");
     const byRel = new Map();
     for (const r of rows) {
-      const m = String(r.content).match(/来源: ([^）)]+)/);
-      if (!m) continue;
-      const rel = m[1].trim();
+      const rel = parseSourceRel(r.content);
+      if (!rel) continue;
       if (!byRel.has(rel)) byRel.set(rel, { count: 0, last: "" });
       const e = byRel.get(rel);
       e.count = Math.max(e.count, Number(r.access_count) || 0);
@@ -507,13 +516,13 @@ function pruneMemory() {
   try { db = new DatabaseSync(join(homedir(), ".mnemon/data/default/mnemon.db"), { readOnly: false }); }
   catch (e) { return { error: "无法打开 mnemon db: " + e.message }; }
   try {
-    const rows = db.prepare("SELECT id, content FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki/%");
+    // 同 usage：平台路径分隔符不同，只匹配 "来源: wiki" 前缀
+    const rows = db.prepare("SELECT id, content FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki%");
     let pruned = 0;
     const gone = [];
     for (const r of rows) {
-      const m = String(r.content).match(/来源: ([^）)]+)/);
-      if (!m) continue;
-      const rel = m[1].trim();
+      const rel = parseSourceRel(r.content);
+      if (!rel) continue;
       if (!existsSync(join(VAULT, rel))) {
         // 软删（mnemon 的 deleted_at 机制）
         db.prepare("UPDATE insights SET deleted_at = ? WHERE id = ?").run(new Date().toISOString(), r.id);
