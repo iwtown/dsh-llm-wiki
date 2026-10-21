@@ -6,6 +6,7 @@
  */
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join, relative } from "node:path";
+import { zstdDecompressSync } from "node:zlib";
 import { homedir } from "node:os";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,7 +22,7 @@ process.stdout.on("error", () => {});
 process.stderr.on("error", () => {});
 import { createServer } from "node:http";
 
-const VAULT = process.env.LLM_WIKI_VAULT || "/mnt/d/DB/Obsidian/LLM-Wiki";
+const VAULT = process.env.LLM_WIKI_VAULT || (process.platform === "win32" ? "D:\\DB\\Obsidian\\LLM-Wiki" : "/mnt/d/DB/Obsidian/LLM-Wiki");
 const WIKI = join(VAULT, "wiki");
 const STATE_DIR = join(homedir(), ".dsh/llm-wiki");
 const STATE_FILE = process.env.LLM_WIKI_STATE || join(STATE_DIR, "pipeline-state.json");
@@ -50,6 +51,40 @@ function extractFmText(content) {
   const end = content.indexOf("\n---", start + 3);
   if (end < 0) return null;
   return { start, end, fm: content.slice(start + 3, end) };
+}
+
+// OKF v0.2：sources 条目必须是映射（resource 必填）。把历史字符串/内联数组规范化为块列表。
+// 幂等：已经是 { resource: ... } 或 resource: ... 的条目原样保留。
+function normalizeSourcesField(content) {
+  const blk = extractFmText(content);
+  if (!blk) return content;
+  const lines = blk.fm.split("\n");
+  const idx = lines.findIndex((l) => /^sources:\s*/.test(l));
+  if (idx === -1) return content;
+  let end = idx + 1;
+  while (end < lines.length && (/^\s+\S/.test(lines[end]) || /^\s*-\s/.test(lines[end]) || lines[end].trim() === "")) end++;
+  const valueLines = lines.slice(idx + 1, end);
+  const inline = lines[idx].replace(/^sources:\s*/, "").trim();
+  let entries = [];
+  if (inline.startsWith("[")) {
+    const inner = inline.slice(1, -1).trim();
+    entries = inner ? inner.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  } else if (inline) {
+    entries = [inline];
+  } else {
+    for (const l of valueLines) {
+      const m = l.match(/^\s*-\s*(.+?)\s*$/);
+      if (m) entries.push(m[1]);
+    }
+  }
+  if (entries.length === 0) return content;
+  if (entries.every((e) => /^\{/.test(e) || /(^|\s)resource:/.test(e))) return content;
+  const newLines = entries.map((e) => {
+    const v = /^["']/.test(e) ? e : JSON.stringify(e);
+    return "  - resource: " + v;
+  });
+  lines.splice(idx, end - idx, "sources:", ...newLines);
+  return content.slice(0, blk.start + 3) + lines.join("\n") + "\n---" + content.slice(blk.end + 4);
 }
 
 // frontmatter 字段设置（有则替换，无则追加；支持 frontmatter 不在文件开头）
@@ -170,6 +205,8 @@ function okfAlign(pages) {
       const res = /^https?:\/\//.test(fm.source) ? fm.source : fm.source;
       content = setFmField(content, "sources", "[{ resource: " + JSON.stringify(res) + " }]");
     }
+    // sources：OKF v0.2 要求条目是对象（resource 必填）；把历史字符串数组规范化为对象数组
+    content = normalizeSourcesField(content);
     // generated：补 by/at（at 用 created/updated 日期近似 ISO）
     if (!fm.generated) {
       const at = (fm.updated || fm.created || today) + "T00:00:00Z";
@@ -313,41 +350,52 @@ function compilePatterns(pages) {
 // 幂等：state.exportedDsh 记录 {sessionId: mtime}；只导出 user 文本 + assistant 正文（不导出 reasoning/工具详情）
 const DSH_SESSIONS = join(homedir(), ".dsh/sessions");
 
+/** 解压 DSH 会话日志：node:zlib zstd 逐帧解（0.2.x 为多帧追加文件）。 */
+function readSessionLog(file) {
+  const buf = readFileSync(file);
+  const starts = [];
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === 0x28 && buf[i + 1] === 0xb5 && buf[i + 2] === 0x2f && buf[i + 3] === 0xfd) starts.push(i);
+  }
+  if (starts.length === 0) return "";
+  let out = "";
+  for (let i = 0; i < starts.length; i++) {
+    const end = starts[i + 1] ?? buf.length;
+    try { out += zstdDecompressSync(buf.subarray(starts[i], end)).toString("utf8"); } catch {}
+  }
+  return out;
+}
+
 function buildSessionMd(sessionId, raw) {
   const meta = { cwd: "", preset: "", createdAt: 0 };
   const blocks = [];
-  let asstBuf = [];
-  let curTurn = -1;
-  const flush = () => {
-    if (asstBuf.length) {
-      const text = asstBuf.join("").trim();
-      if (text) blocks.push({ role: "assistant", text });
-      asstBuf = [];
-    }
-  };
+  const textOf = (content) => (Array.isArray(content) ? content : []).filter((b) => b && b.type === "text").map((b) => b.text || "").join("").trim();
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
     if (!ev || typeof ev !== "object") continue;
     if (ev.type === "session") {
-      meta.cwd = ev.cwd || ""; meta.preset = ev.agentPreset || ""; meta.createdAt = ev.createdAt || 0;
-    } else if (ev.type === "agent/inbox/spliced" && ev.data && Array.isArray(ev.data.inserted)) {
-      for (const ins of ev.data.inserted) {
-        if (ins.role === "user" && Array.isArray(ins.content)) {
-          const text = ins.content.map(c => (c && c.text) || "").join("").trim();
-          if (text) { flush(); blocks.push({ role: "user", text }); }
-        }
-      }
-    } else if (ev.type === "text-chunks" && ev.data && Array.isArray(ev.data.texts)) {
-      const turn = ev.data.turn || 0;
-      if (turn !== curTurn) { flush(); curTurn = turn; }
-      asstBuf.push(ev.data.texts.join(""));
+      meta.cwd = ev.cwd || (ev.data && ev.data.cwd) || "";
+      meta.preset = ev.agentPreset || (ev.data && ev.data.agentPreset) || "";
+      meta.createdAt = ev.createdAt || (ev.data && ev.data.createdAt) || 0;
+      continue;
+    }
+    const data = ev.data || {};
+    if (ev.type === "user/message") {
+      // 只保留真实用户输入：跳过 time-context / runtime-context / skill-catalog / user-approval 等注入
+      const kind = data.source && data.source.kind;
+      if (kind && kind !== "user") continue;
+      const text = textOf(data.content);
+      const last = blocks[blocks.length - 1];
+      if (text && !(last && last.role === "user" && last.text === text)) blocks.push({ role: "user", text });
+    } else if (ev.type === "assistant/message") {
+      const text = textOf(data.message && data.message.content);
+      if (text) blocks.push({ role: "assistant", text });
     }
   }
-  flush();
   const date = meta.createdAt ? new Date(meta.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
-  const title = "DSH 会话复盘" + (meta.cwd ? "：" + String(meta.cwd).split("/").filter(Boolean).pop() : "");
+  const title = "DSH 会话复盘" + (meta.cwd ? "：" + String(meta.cwd).split(/[\\/]/).filter(Boolean).pop() : "");
   let md = "---\ntitle: \"" + title + "\"\ntags: [dsh, session]\ntype: \"发现\"\ncreated: " + date + "\nsource: \"dsh:" + sessionId + "\"\n---\n\n# " + title + "\n\n- **会话**: " + sessionId + "\n- **工作目录**: " + (meta.cwd || "-") + "\n- **Agent 预设**: " + (meta.preset || "-") + "\n- **创建时间**: " + (meta.createdAt ? new Date(meta.createdAt).toISOString() : "-") + "\n- **消息块**: " + blocks.length + "\n\n## 对话记录\n\n";
   for (const b of blocks) {
     md += "### " + (b.role === "user" ? "用户" : "助手") + "\n\n" + b.text + "\n\n";
@@ -370,12 +418,20 @@ function dshSessionExport() {
       for (const sd of sessionDirs) {
         if (!sd.startsWith("session-")) continue;
         const sdir = join(wsDir, sd);
-        const zf = join(sdir, "session.jsonl.zstd");
+        // DSH 0.2.x 写作 session.v4.jsonl.zstd（版本号会变），按前缀匹配
+        const zf = (() => {
+          try {
+            const hit = readdirSync(sdir).filter((n) => /^session.*\.jsonl\.zstd$/.test(n))
+              .map((n) => join(sdir, n))
+              .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+            return hit;
+          } catch { return undefined; }
+        })();
         try {
           if (!statSync(sdir).isDirectory() || !existsSync(zf)) continue;
           const st = statSync(zf);
           if (exported[sd] === st.mtimeMs) continue;
-          const raw = execFileSync("zstd", ["-d", "-c", zf], { maxBuffer: 256 * 1024 * 1024, encoding: "utf8" });
+          const raw = readSessionLog(zf);
           const md = buildSessionMd(sd, raw);
           const date = new Date(st.mtimeMs).toISOString().slice(0, 10);
           const dest = join(outDir, date + "-" + sd.replace(/^session-/, "").slice(0, 8) + ".md");
@@ -571,6 +627,57 @@ function generateDraft(changed) {
   });
 }
 
+/** 读取 SiliconFlow key：环境变量 > DSH 凭据 > WSL 时代的 ~/.modlens/config.json */
+function readEmbedKey() {
+  if (process.env.MNEMON_EMBED_API_KEY) return process.env.MNEMON_EMBED_API_KEY;
+  if (process.env.EMBED_KEY) return process.env.EMBED_KEY;
+  try {
+    const cred = readFileSync(join(homedir(), ".dsh", ".credentials.yaml"), "utf8");
+    const m = cred.match(/^\s*SF_API_KEY:\s*(\S+)\s*$/m);
+    if (m) return m[1].replace(/^["']|["']$/g, "");
+  } catch {}
+  try {
+    const legacy = JSON.parse(readFileSync(join(homedir(), ".modlens", "config.json"), "utf8"));
+    return legacy.apiKey || legacy.key || "";
+  } catch {}
+  return "";
+}
+
+/** 解析 mnemon 可执行文件：显式 env > npm 全局包内原生 exe > PATH（Windows 上 .cmd 需要 shell） */
+function mnemonCli() {
+  if (process.env.MNEMON_CLI_PATH && existsSync(process.env.MNEMON_CLI_PATH)) return { command: process.env.MNEMON_CLI_PATH };
+  const bin = process.platform === "win32" ? "mnemon.exe" : "mnemon";
+  const pkg = process.platform === "win32" ? "mnemon-win32-x64" : "mnemon-linux-x64";
+  const rel = ["@mnemon-dev", "mnemon", "node_modules", "@mnemon-dev", pkg, "bin", bin];
+  const roots = [];
+  if (process.env.APPDATA) roots.push(join(process.env.APPDATA, "npm", "node_modules"));
+  if (process.env.ProgramFiles) roots.push(join(process.env.ProgramFiles, "nodejs", "node_modules"));
+  if (process.env.NVM_HOME) roots.push(join(process.env.NVM_HOME, "node_modules"));
+  if (process.env.LOCALAPPDATA) roots.push(join(process.env.LOCALAPPDATA, "npm", "node_modules"));
+  // nvm / volta / 自定义 node 目录：从 PATH 里的 node 目录反推全局 node_modules
+  for (const dir of (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":")) {
+    if (!dir) continue;
+    roots.push(join(dir, "node_modules"));
+    roots.push(join(dir, "..", "lib", "node_modules"));
+  }
+  for (const r of roots) { const p = join(r, ...rel); if (existsSync(p)) return { command: p }; }
+  return { command: "mnemon", shell: process.platform === "win32" };
+}
+
+/** 把 embedding 配置注入 mnemon CLI（mnemon 自己读不到 DSH profile 里的配置） */
+function mnemonEnv() {
+  const endpoint = process.env.MNEMON_EMBED_ENDPOINT || process.env.EMBED_ENDPOINT || "https://api.siliconflow.cn/v1";
+  const env = {
+    ...process.env,
+    MNEMON_EMBED_ENDPOINT: endpoint,
+    MNEMON_EMBED_MODEL: process.env.MNEMON_EMBED_MODEL || process.env.EMBED_MODEL || "BAAI/bge-m3",
+    MNEMON_EMBED_PROTOCOL: process.env.MNEMON_EMBED_PROTOCOL || "openai",
+  };
+  const key = readEmbedKey();
+  if (key) env.MNEMON_EMBED_API_KEY = key;
+  return env;
+}
+
 function startFakeEmbed() {
   const srv = createServer((req, res) => { res.writeHead(404, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "embedding unavailable" })); });
   return new Promise((resolve, reject) => { srv.once("error", reject); srv.listen(11434, "127.0.0.1", () => resolve(srv)); });
@@ -591,12 +698,21 @@ async function syncMemory(pages) {
   mkdirSync(STATE_DIR, { recursive: true });
   writeFileSync(tmp, JSON.stringify(draft, null, 1));
   let fake = null;
-  if (FAKE_EMBED !== "never") {
+  // 只有本地 Ollama 端点才需要"假 embedding 服务快速失败"；直连 OpenAI 兼容端点时不需要
+  const endpoint = process.env.MNEMON_EMBED_ENDPOINT || process.env.EMBED_ENDPOINT || "https://api.siliconflow.cn/v1";
+  const localEndpoint = /127\.0\.0\.1|localhost/i.test(endpoint);
+  if (localEndpoint && FAKE_EMBED !== "never") {
     const alive = await ollamaAlive();
     if (!alive) { fake = await startFakeEmbed().catch(e => { console.log("[sync] startFakeEmbed 失败:", String(e).slice(0, 80)); return null; }); }
   }
   try {
-    await execFileAsync("mnemon", ["import", tmp], { timeout: 300000, maxBuffer: 16 * 1024 * 1024 });
+    const cli = mnemonCli();
+    await execFileAsync(cli.command, ["import", tmp], {
+      timeout: 300000,
+      maxBuffer: 16 * 1024 * 1024,
+      env: mnemonEnv(),
+      ...(cli.shell ? { shell: true } : {}),
+    });
   } catch (e) {
     const tail = String(e.stdout || "").trim().slice(-150);
     return { synced: 0, error: String(e.message || e).slice(0, 120) + (tail ? " | out:" + tail : "") };

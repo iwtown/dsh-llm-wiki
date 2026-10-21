@@ -21,18 +21,18 @@
 
 | 组件 | 文件 | 部署位置 |
 |---|---|---|
-| 生命周期插件 | plugin/dsh-llm-wiki.mjs | ~/.dsh/profiles/web/（cordis.patch.yml 挂载） |
-| 检索技能 | skills/wiki-search/SKILL.md | ~/.agents/skills/wiki-search/ |
-| 写入技能 | skills/wiki-write/SKILL.md | ~/.agents/skills/wiki-write/ |
-| 管线 | scripts/llm-wiki-pipeline.mjs | ~/bin/ |
-| 向量代理 | scripts/embed-proxy.mjs | ~/bin/ + systemd 服务 |
-| 定时 | systemd/llm-wiki-pipeline.timer | ~/.config/systemd/user/ |
+| 生命周期插件 | plugin/dsh-llm-wiki.mjs | `$DSH_HOME/profiles/<profile>/`（cordis.patch.yml 挂载；桌面版为 desktop） |
+| 检索技能 | skills/wiki-search/SKILL.md | `~/.agents/skills/wiki-search/` |
+| 写入技能 | skills/wiki-write/SKILL.md | `~/.agents/skills/wiki-write/` |
+| 管线 | scripts/llm-wiki-pipeline.mjs | `$DSH_HOME/bin/`（WSL 旧布局为 `~/bin/`） |
+| 向量代理（可选，旧方案） | scripts/embed-proxy.mjs | 仅当 embedding 端点只认 Ollama 协议时需要；mnemon 0.5+ 直连 OpenAI 兼容端点时不需要 |
+| 定时（Linux） | systemd/llm-wiki-pipeline.timer | `~/.config/systemd/user/`；Windows 用 `install.ps1` 建计划任务 |
 
 ## 依赖
 
-- dsh >= 0.1.1-rc.2（web profile）
-- Node.js >= 22.19（管线用 node:sqlite）
-- ripgrep（wiki-search 检索）
+- dsh >= 0.2.0-rc.1（web 或 desktop profile；0.1.7 亦可）
+- Node.js >= 22.15（管线用 `node:sqlite` 与 `zlib.zstdDecompressSync`；DSH 内置 24.x 满足）
+- ripgrep（可选：DSH 的 `grep` 工具自带 ripgrep；只有命令行检索才需要 PATH 上的 `rg`）
 - mnemon CLI + dsh-mnemon 插件（记忆体）
 - Obsidian vault（wiki 页面），目录结构见 [wiki 结构](#wiki-结构)
 - SiliconFlow API key（可选，用于向量召回；复用 ~/.modlens/config.json 或环境变量 EMBED_KEY）
@@ -63,9 +63,38 @@ systemctl --user restart dsh-web
 
 `install.sh` 会把各组件复制到标准位置并启用 systemd 服务。然后：
 
-1. **配置 vault 路径**：默认 /mnt/d/DB/Obsidian/LLM-Wiki（管线可用环境变量 LLM_WIKI_VAULT 覆盖；插件在 cordis.patch.yml 的 config.vault 覆盖；**SKILL 文件中的路径需按本机修改**）
-2. **首次记忆体同步**：`node ~/bin/llm-wiki-pipeline.mjs --sync`（把 wiki 精华导入 mnemon）
-3. **可选向量**：确认 embed-proxy 服务运行后 `mnemon embed --all` 补齐向量
+1. **配置 vault 路径**：Linux/WSL 默认 `/mnt/d/DB/Obsidian/LLM-Wiki`，Windows 默认 `D:\DB\Obsidian\LLM-Wiki`（管线可用 `LLM_WIKI_VAULT` 覆盖；插件在 cordis.patch.yml 的 `config.vault` 覆盖；**SKILL 文件中的路径需按本机修改**）
+2. **首次记忆体同步**：`node $DSH_HOME/bin/llm-wiki-pipeline.mjs --sync`（WSL 为 `~/bin/`；把 wiki 精华导入 mnemon）
+3. **可选向量**：mnemon 0.5+ 可直接用 OpenAI 兼容端点（endpoint 以 `/v1` 结尾）；只有端点只认 Ollama 协议时才需要 embed-proxy
+
+### Windows / DSH 桌面版
+
+DSH 桌面版（profile `desktop`）在 Windows 上没有 systemd、没有 `~/bin`，且 Node 由应用内置。用 PowerShell 安装：
+
+```powershell
+git clone https://github.com/iwtown/dsh-llm-wiki.git
+cd dsh-llm-wiki
+.\install.ps1                 # 插件 + 技能 + 管线 + 每日 10:00 计划任务
+# .\install.ps1 -NoSchedule   # 不建计划任务
+# .\install.ps1 -Uninstall    # 卸载（patch 里的 insert 需手动删）
+```
+
+安装后的位置：
+
+| 组件 | Windows 位置 |
+|---|---|
+| 插件 | `$env:USERPROFILE\.dsh\profiles\desktop\dsh-llm-wiki.mjs` |
+| 技能 | `$env:USERPROFILE\.agents\skills\wiki-search\`、`wiki-write\` |
+| 管线 | `$env:USERPROFILE\.dsh\bin\llm-wiki-pipeline.mjs` |
+| 定时 | 计划任务 `LLM-Wiki Pipeline`（10:00 每日） |
+
+桌面版适配要点（0.8.0）：
+
+- **会话导出**：DSH 0.2.x 写作 `session.v4.jsonl.zstd`（版本号会变），管线按前缀匹配并用 `node:zlib` 逐帧解压，不再依赖 `zstd` 命令。
+- **记忆体同步**：Windows 上 `mnemon` 是 `.cmd`，直接用 `execFile` 会 ENOENT/EINVAL；管线会优先找 npm 全局包里的 `mnemon.exe`，找不到再退回 `shell: true`。
+- **embedding**：管线把 `MNEMON_EMBED_*` 注入 mnemon 子进程（endpoint/model/protocol/apiKey），key 依次读 `MNEMON_EMBED_API_KEY`、`EMBED_KEY`、`~/.dsh/.credentials.yaml` 的 `SF_API_KEY`、旧的 `~/.modlens/config.json`。
+- **检索**：SKILL 改用 DSH 的 `grep` 工具（自带 ripgrep），不要求 PATH 上有 `rg`。
+- **插件**：管线位置由 `$DSH_HOME` 推导；`session/disposed` 触发 `--all` 时会把 `LLM_WIKI_VAULT` 传给子进程。
 
 ## 使用
 
@@ -123,13 +152,15 @@ LLM-Wiki/
 
 | 字段 | 类型 | 写入方 | 说明 |
 |---|---|---|---|
-| `sources` | `string[]` | 模型填写；管线 okfAlign 补全 | 知识来源（URL / session / 配置路径） |
+| `sources` | `object[]`（每项 `resource` 必填） | 模型填写；管线 okfAlign 补全/规范化 | 知识来源（URL / session / 配置路径）；历史字符串数组会被 `--okf` 自动转成 `{ resource: ... }` |
 | `generated` | `{ by, at }` | 管线自动补充 | 生成者（`agent/dsh-llm-wiki` 或 `human:<id>`） |
 | `verified` | `{ by, at }` | quality_score≥4 自动标记 / --rate 确认 | 信任分级：agent verified / human reviewed |
 | `status` | `active\|draft\|archived` | 管线 stale 检测 + --rate 更新 | 生命周期状态 |
 | `stale_after` | ISO 日期 | 管线 okfAlign 自动计算 | created/updated + 90 天 |
 | `description` | `string` | 管线 okfAlign 从内容摘要推导 | 一句话知识描述 |
 | `quality_score` | 1-5 | 管线 usage 回写 + --rate 更新 | 知识质量评分 |
+
+> OKF 规范截至 2026-10-21 仍为 **v0.2**（SPEC.md 未更新）；0.8.0 起 `--okf` 会把历史 `sources` 字符串数组规范化为 `{ resource: ... }` 对象，幂等。
 
 ### 信任分级
 

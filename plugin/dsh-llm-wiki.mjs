@@ -9,18 +9,29 @@
  *  2. session/disposed → 异步触发 P2 管线（防重入 + 冷却）
  *
  * 配置（cordis.patch.yml config）:
- *  vault: vault 路径（默认 /mnt/d/DB/Obsidian/LLM-Wiki）
- *  previewOrder / rulesOrder: section 顺序
+ *  vault:        vault 路径（默认按平台：Windows D:\DB\Obsidian\LLM-Wiki，其他 /mnt/d/DB/Obsidian/LLM-Wiki）
+ *  previewOrder: 知识预览 section 顺序（默认 138）
+ *  rulesOrder:   守则 section 顺序（默认 139）
+ *
+ * 跨平台说明：
+ *  - 管线位置由 $DSH_HOME 推导（Windows 桌面版为 C:\Users\<user>\.dsh\bin\llm-wiki-pipeline.mjs），
+ *    不再假设 ~/bin（WSL）。
+ *  - 子进程用 process.execPath 启动；DSH Host 设置 ELECTRON_RUN_AS_NODE=1，因此 Electron
+ *    exe 会以 Node 方式运行 .mjs。若将来该环境变量消失，可改为显式解析内置 node.exe。
  */
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
 export const name = "dsh-llm-wiki";
 export const inject = ["systemPrompt"];
 
-const DEFAULT_VAULT = "/mnt/d/DB/Obsidian/LLM-Wiki";
-const PIPELINE = process.env.HOME + "/bin/llm-wiki-pipeline.mjs";
+const DSH_HOME = process.env.DSH_HOME || join(process.env.USERPROFILE || homedir(), ".dsh");
+const DEFAULT_VAULT = process.platform === "win32"
+  ? "D:\\DB\\Obsidian\\LLM-Wiki"
+  : "/mnt/d/DB/Obsidian/LLM-Wiki";
+const PIPELINE = join(DSH_HOME, "bin", "llm-wiki-pipeline.mjs");
 const CACHE_TTL = 60_000; // 读文件缓存 60s
 
 function cached(file, ttl = CACHE_TTL) {
@@ -38,17 +49,19 @@ function cached(file, ttl = CACHE_TTL) {
 
 export function apply(ctx, config = {}) {
   const vault = config.vault && String(config.vault).length > 0 ? config.vault : DEFAULT_VAULT;
+  const previewOrder = Number.isInteger(config.previewOrder) ? config.previewOrder : 138;
+  const rulesOrder = Number.isInteger(config.rulesOrder) ? config.rulesOrder : 139;
   const rulesFile = join(vault, "schema.md");
-  const previewFile = join(vault, "wiki/index.md");
+  const previewFile = join(vault, "wiki", "index.md");
   const readRules = cached(rulesFile);
   const readPreview = cached(previewFile);
-  try { console.log("[dsh-llm-wiki] apply() vault=" + vault + " rules=" + existsSync(rulesFile) + " preview=" + existsSync(previewFile)); } catch {}
+  try { console.log("[dsh-llm-wiki] apply() vault=" + vault + " rules=" + existsSync(rulesFile) + " preview=" + existsSync(previewFile) + " pipeline=" + existsSync(PIPELINE)); } catch {}
 
   // ── 1) systemPrompt 注入 ──
   // 知识预览（先于守则，order 更低先出现）
   ctx.effect(() => ctx.systemPrompt.section({
     name: "llm-wiki:preview",
-    order: 138,
+    order: previewOrder,
     text: () => {
       const idx = readPreview();
       if (!idx) return "";
@@ -59,7 +72,7 @@ export function apply(ctx, config = {}) {
   // schema 守则
   ctx.effect(() => ctx.systemPrompt.section({
     name: "llm-wiki:rules",
-    order: 139,
+    order: rulesOrder,
     text: () => {
       const schema = readRules();
       if (!schema) return "";
@@ -74,6 +87,10 @@ export function apply(ctx, config = {}) {
 
   const runPipeline = () => {
     if (running) return;
+    if (!existsSync(PIPELINE)) {
+      try { console.log("[dsh-llm-wiki] pipeline not found, skipped: " + PIPELINE); } catch {}
+      return;
+    }
     const now = Date.now();
     if (now - lastRun < COOLDOWN_MS) return;
     running = true;
@@ -81,6 +98,9 @@ export function apply(ctx, config = {}) {
     const child = spawn(process.execPath, [PIPELINE, "--all"], {
       stdio: "ignore",
       detached: true,
+      windowsHide: true,
+      // 管线自身的默认 vault 是 WSL 路径，必须显式传入
+      env: { ...process.env, LLM_WIKI_VAULT: vault },
     });
     child.on("exit", (code) => {
       running = false;
