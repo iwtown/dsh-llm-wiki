@@ -63,9 +63,21 @@ if (-not $NoSchedule) {
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
   if ($node) {
     $pipeline = Join-Path $DshHome "bin\llm-wiki-pipeline.mjs"
-    $action = [char]34 + $node + [char]34 + " " + [char]34 + $pipeline + [char]34 + " --all"
-    schtasks /Create /TN $TaskName /TR $action /SC DAILY /ST 10:00 /F | Out-Null
-    Write-Host "    scheduled task created (10:00 daily)"
+    # 用 .cmd 包装把输出写进 cron.log：计划任务失败时可回溯（2026-10-22 曾出现一次 0xC000013A 无线索）
+    $wrapper = Join-Path $DshHome "bin\llm-wiki-cron.cmd"
+    $logDir = Join-Path $DshHome "llm-wiki"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $log = Join-Path $logDir "cron.log"
+    $lines = @(
+      "@echo off",
+      "if not exist ""$logDir"" mkdir ""$logDir""",
+      "echo [%DATE% %TIME%] start >> ""$log""",
+      """" + $node + """ """ + $pipeline + """ --all >> ""$log"" 2>&1",
+      "echo [%DATE% %TIME%] exit=%ERRORLEVEL% >> ""$log"""
+    )
+    Set-Content -Path $wrapper -Value $lines -Encoding ascii
+    schtasks /Create /TN $TaskName /TR ('"' + $wrapper + '"') /SC DAILY /ST 10:00 /F | Out-Null
+    Write-Host "    scheduled task created (10:00 daily, logs -> $log)"
   } else {
     Write-Host "    node not found in PATH; skipped scheduled task"
   }

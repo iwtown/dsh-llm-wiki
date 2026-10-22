@@ -129,7 +129,8 @@ function parseSourceRel(content) {
   const s = String(content);
   const idx = s.lastIndexOf("来源: ");
   if (idx < 0) return null;
-  const rel = s.slice(idx + 4).replace(/[）)]\s*$/, "").trim();
+  // 去掉 "（来源: path#小节）" 里的 #小节 片段，否则存在性检查会把块当成失效页
+  const rel = s.slice(idx + 4).replace(/[）)]\s*$/, "").replace(/#[^#]*$/, "").trim();
   return rel || null;
 }
 
@@ -518,7 +519,8 @@ function pruneMemory() {
   catch (e) { return { error: "无法打开 mnemon db: " + e.message }; }
   try {
     // 同 usage：平台路径分隔符不同，只匹配 "来源: wiki" 前缀
-    const rows = db.prepare("SELECT id, content FROM insights WHERE content LIKE ? AND deleted_at IS NULL").all("%来源: wiki%");
+    // 只清理 wiki 导入条目；对话经验（source=agent/user）即使带 wiki 路径也不能动
+    const rows = db.prepare("SELECT id, content FROM insights WHERE source='import' AND content LIKE ? AND deleted_at IS NULL").all("%来源: wiki%");
     let pruned = 0;
     const gone = [];
     for (const r of rows) {
@@ -630,7 +632,7 @@ const MNEMON_IMPORTANCE = { 规则: 5, 决策: 4, 项目: 3, 发现: 3, 概念: 
 // ── H2 切块：每个小节 = 一条可独立召回的原子记忆 ──
 // 配置（env）：LLM_WIKI_SYNC_EXCLUDE / CHUNK_MIN / CHUNK_MAX / CHUNK_PER_PAGE / CHUNK_BATCH
 const SYNC_EXCLUDE = new Set((process.env.LLM_WIKI_SYNC_EXCLUDE || "引用,发现").split(",").map(s => s.trim()).filter(Boolean));
-const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 80);
+const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 40);
 const CHUNK_MAX = Number(process.env.LLM_WIKI_CHUNK_MAX || 1200);
 const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 12);
 const CHUNK_BATCH = Number(process.env.LLM_WIKI_CHUNK_BATCH || 40);
