@@ -634,7 +634,28 @@ const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 80);
 const CHUNK_MAX = Number(process.env.LLM_WIKI_CHUNK_MAX || 1200);
 const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 12);
 const CHUNK_BATCH = Number(process.env.LLM_WIKI_CHUNK_BATCH || 40);
-const SKIP_SECTION = /^(相关|参考|来源|变更|更新记录|附录|目录)/;
+const SKIP_SECTION = /^(相关|参考|来源|关联|链接|参见|变更|更新|日志|经验|复盘|附录|目录|导航|索引|版本|license)/i;
+/** 去掉标题里的 emoji/标点，用于跳过规则匹配（原标题仍用于内容前缀）。 */
+function normalizeHeading(h) {
+  return String(h).replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "").replace(/^[\s:：·\-—|]+/, "").trim();
+}
+
+/** 解析 frontmatter 里 related 列表中的 wikilink（只取 frontmatter 段）。 */
+function relatedTargets(content) {
+  const lines = String(content).split("\n");
+  const out = [];
+  let inFm = false, inRel = false;
+  for (const line of lines) {
+    if (!inFm) { if (line.trim() === "---") inFm = true; continue; }
+    if (line.trim() === "---") break;
+    if (/^related:\s*$/.test(line)) { inRel = true; continue; }
+    if (inRel) {
+      if (/^\S/.test(line)) break;
+      for (const m of line.matchAll(/\[\[([^\]]+)\]\]/g)) out.push(m[1].split("|")[0].trim());
+    }
+  }
+  return out;
+}
 
 function stripFrontmatter(text) {
   if (text.startsWith("---")) { const i = text.indexOf("\n---", 3); if (i > 0) return text.slice(i + 4); }
@@ -679,7 +700,7 @@ function chunkPage(p) {
     if (chunks.length >= CHUNK_PER_PAGE) break;
     const text = sec.lines.join("\n").trim();
     if (text.length < CHUNK_MIN) continue;
-    if (sec.heading && SKIP_SECTION.test(sec.heading.trim())) continue;
+    if (sec.heading && SKIP_SECTION.test(normalizeHeading(sec.heading))) continue;
     // 过滤早期 pi 会话批量导入的转储页：没有知识价值，只会污染召回
     if (/批量导入 — 来自|🤖 批量导入|自动编译自 \[\[raw\/sessions/.test(text)) continue;
     for (const piece of splitLong(text, CHUNK_MAX)) {
@@ -787,7 +808,8 @@ async function syncMemory(pages) {
     const prev = state[rel];
     if (prev && Array.isArray(prev.chunks)) for (const c of prev.chunks) if (c.id) forgetIds.push(c.id);
   }
-  if (plan.length === 0 && forgetIds.length === 0) return { synced: 0, chunks: 0, note: "无变更" };
+  const linkModeEarly = process.env.LLM_WIKI_LINK_MODE || "incremental";
+  if (plan.length === 0 && forgetIds.length === 0 && linkModeEarly !== "all") return { synced: 0, chunks: 0, note: "无变更" };
   const cli = mnemonCli();
   const env = mnemonEnv();
   // 同一块可能被多页引用（内容去重后共享 id），只忘掉不再被任何页引用的
@@ -841,7 +863,67 @@ async function syncMemory(pages) {
     }
   }
   saveState(nextPages);
-  return { synced: imported.length, chunks: plan.length, forgotten, pages: syncPages.length, ...(error ? { error } : {}) };
+  const result = { synced: imported.length, chunks: plan.length, forgotten, pages: syncPages.length, ...(error ? { error } : {}) };
+  // 对账：按当前块哈希清掉历史遗留的 import 孤儿条目（状态里没记录到 id 的旧块）
+  if (!error && process.env.LLM_WIKI_RECONCILE !== "off") {
+    try {
+      const allHashes = new Set();
+      for (const v of Object.values(nextPages)) for (const c of v.chunks) allHashes.add(c.h);
+      const dbDir = process.env.MNEMON_DATA_DIR || join(homedir(), ".mnemon");
+      const dbPath = join(dbDir, "data", "default", "mnemon.db");
+      if (existsSync(dbPath)) {
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        const rows = db.prepare("select id, content from insights where deleted_at is null and source='import'").all();
+        db.close();
+        let orphans = 0;
+        for (const row of rows) {
+          const h = createHash("sha1").update(String(row.content)).digest("hex").slice(0, 16);
+          if (allHashes.has(h)) continue;
+          try { await execFileAsync(cli.command, ["forget", row.id], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) }); orphans++; } catch {}
+        }
+        if (orphans) result.orphans = orphans;
+      }
+    } catch (e) { result.reconcileError = String(e.message || e).slice(0, 120); }
+  }
+  // 语义边：把 wiki 页面的 related 双链映射成 mnemon semantic 边（每页最多 3 条）。
+  // LLM_WIKI_LINK_MODE=all 做一次全量；默认只处理本次有变更的页。
+  if (!error && process.env.LLM_WIKI_LINKS !== "off") {
+    try {
+      const norm = (s) => String(s).replace(/\\/g, "/");
+      const pageIdByRel = new Map();
+      for (const [rel, v] of Object.entries(nextPages)) {
+        const first = v.chunks.find(c => c.id);
+        if (first) pageIdByRel.set(norm(rel), first.id);
+      }
+      const freshSet = new Set([...freshByPage.keys()].map(norm));
+      const mode = process.env.LLM_WIKI_LINK_MODE || "incremental";
+      const seen = new Set();
+      let linked = 0;
+      for (const pg of syncPages) {
+        const srcRel = norm(pg.rel);
+        if (mode !== "all" && !freshSet.has(srcRel)) continue;
+        const srcId = pageIdByRel.get(srcRel);
+        if (!srcId) continue;
+        const links = relatedTargets(pg.content).slice(0, 3);
+        for (const link of links) {
+          const targetRel = norm(link.replace(/^wiki\//i, "")).replace(/\.md$/i, "") + ".md";
+          const tgtId = pageIdByRel.get("wiki/" + targetRel);
+          if (!tgtId || tgtId === srcId) continue;
+          const pair = [srcId, tgtId].sort().join("|");
+          if (seen.has(pair)) continue;
+          seen.add(pair);
+          try {
+            await execFileAsync(cli.command, ["link", srcId, tgtId, "--type", "semantic", "--weight", "0.6", "--meta", JSON.stringify({ reason: "wiki related" })], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) });
+            linked++;
+          } catch {}
+          if (linked >= 120) break;
+        }
+        if (linked >= 120) break;
+      }
+      if (linked) result.links = linked;
+    } catch (e) { result.linkError = String(e.message || e).slice(0, 120); }
+  }
+  return result;
 }
 
 function appendLog(entry) {
