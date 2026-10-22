@@ -9,6 +9,7 @@ import { join, relative } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import { homedir } from "node:os";
 import { execFileSync, execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 const execFileAsync = promisify(execFile);
@@ -621,28 +622,76 @@ function rebuildIndex(pages) {
 
 function loadState() { try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return {}; } }
 function saveState(s) { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify(s, null, 1)); }
-// 变更检测：mtime 单因子（usage 元数据回写会恢复 mtime，不触发重复同步）
-function changedPages(pages, state) {
-  return pages.filter(p => { const st = state[p.rel]; return !st || st.mtime !== p.mtime; });
-}
+// 变更检测改为按页的 H2 块哈希（见 chunkPage / syncMemory），不再用 mtime 单因子。
 // wiki 分类 -> mnemon category（导入时写入，否则全部落到 general，召回/gc 无区分度）
 const MNEMON_CATEGORY = { 决策: "decision", 规则: "decision", 发现: "insight", 项目: "fact", 概念: "fact", 流程: "fact", 命令: "fact", 提示: "insight", 记忆: "context", 引用: "general", 基因: "fact" };
 // wiki 分类 -> mnemon importance（gc 阈值 0.5，importance<=2 才会被建议清理）
 const MNEMON_IMPORTANCE = { 规则: 5, 决策: 4, 项目: 3, 发现: 3, 概念: 3, 流程: 3, 命令: 3, 提示: 2, 记忆: 2, 引用: 2, 基因: 3 };
-function generateDraft(changed) {
-  return changed.map(p => {
-    const desc = (p.fm.description || p.fm.summary) && (p.fm.description || p.fm.summary) !== "-" ? "：" + (p.fm.description || p.fm.summary) : "";
-    // 不再加 "[LLM-Wiki/<cat>]" 前缀：它让 "LLM" 成为所有记忆的公共实体，把实体图连成 clique
-    // 实体只放业务实体（project），不要把分类名当实体：否则"发现/决策"会变成新的大团
-    const entities = [p.fm.project].filter(v => v && v !== "-");
-    return {
-      content: (p.fm.title || p.file) + desc + "（来源: " + p.rel + "）",
-      category: MNEMON_CATEGORY[p.cat] || "general",
-      importance: MNEMON_IMPORTANCE[p.cat] ?? (Number(p.fm.quality_score) >= 5 ? 4 : 3),
-      tags: ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : [])].filter(Boolean),
-      entities,
-    };
-  });
+// ── H2 切块：每个小节 = 一条可独立召回的原子记忆 ──
+// 配置（env）：LLM_WIKI_SYNC_EXCLUDE / CHUNK_MIN / CHUNK_MAX / CHUNK_PER_PAGE / CHUNK_BATCH
+const SYNC_EXCLUDE = new Set((process.env.LLM_WIKI_SYNC_EXCLUDE || "引用,发现").split(",").map(s => s.trim()).filter(Boolean));
+const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 80);
+const CHUNK_MAX = Number(process.env.LLM_WIKI_CHUNK_MAX || 1200);
+const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 6);
+const CHUNK_BATCH = Number(process.env.LLM_WIKI_CHUNK_BATCH || 40);
+const SKIP_SECTION = /^(相关|参考|来源|变更|更新记录|附录|目录)/;
+
+function stripFrontmatter(text) {
+  if (text.startsWith("---")) { const i = text.indexOf("\n---", 3); if (i > 0) return text.slice(i + 4); }
+  return text;
+}
+function splitLong(text, max) {
+  if (text.length <= max) return [text];
+  const paras = text.split(/\n\s*\n/).filter(Boolean);
+  const out = []; let cur = "";
+  for (const para of paras) {
+    if (para.length > max) {
+      if (cur) { out.push(cur); cur = ""; }
+      for (let i = 0; i < para.length; i += max) out.push(para.slice(i, i + max));
+      continue;
+    }
+    if ((cur ? cur + "\n\n" + para : para).length > max) { if (cur) out.push(cur); cur = para; }
+    else cur = cur ? cur + "\n\n" + para : para;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+/** 把一页拆成 H2 块；页面 frontmatter 里 recall: false 可退出同步。 */
+function chunkPage(p) {
+  if (String(p.fm.recall).toLowerCase() === "false") return [];
+  const title = p.fm.title || p.file.replace(/\.md$/, "");
+  const qs = Number(p.fm.quality_score);
+  const base = MNEMON_IMPORTANCE[p.cat] ?? 3;
+  const importance = qs >= 4 ? Math.max(base, 4) : qs <= 2 ? Math.min(base, 2) : Math.min(Math.max(base, 3), 4);
+  const entities = [p.fm.project].filter(v => v && v !== "-");
+  const tags = ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : [])].filter(Boolean);
+  const body = stripFrontmatter(p.content);
+  const sections = [];
+  let cur = { heading: "", lines: [] };
+  for (const line of body.split("\n")) {
+    const m = /^##\s+(.+?)\s*$/.exec(line);
+    if (m) { sections.push(cur); cur = { heading: m[1], lines: [] }; }
+    else cur.lines.push(line);
+  }
+  sections.push(cur);
+  const chunks = [];
+  for (const sec of sections) {
+    if (chunks.length >= CHUNK_PER_PAGE) break;
+    const text = sec.lines.join("\n").trim();
+    if (text.length < CHUNK_MIN) continue;
+    if (sec.heading && SKIP_SECTION.test(sec.heading.trim())) continue;
+    for (const piece of splitLong(text, CHUNK_MAX)) {
+      const bodyText = piece.trim();
+      if (bodyText.length < CHUNK_MIN) continue;
+      const head = sec.heading ? "[" + title + "｜" + sec.heading + "] " : "[" + title + "] ";
+      const source = p.rel + (sec.heading ? "#" + sec.heading : "");
+      const content = head + bodyText + "（来源: " + source + "）";
+      const hash = createHash("sha1").update(content).digest("hex").slice(0, 16);
+      chunks.push({ hash, content, section: sec.heading, category: MNEMON_CATEGORY[p.cat] || "general", importance, tags, entities, rel: p.rel });
+      if (chunks.length >= CHUNK_PER_PAGE) break;
+    }
+  }
+  return chunks;
 }
 
 /** 读取 SiliconFlow key：环境变量 > DSH 凭据 > WSL 时代的 ~/.modlens/config.json */
@@ -707,41 +756,86 @@ async function ollamaAlive() {
   }).catch(() => false);
 }
 async function syncMemory(pages) {
-  const syncPages = pages.filter(p => !["引用", "发现"].includes(p.cat));
+  const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && String(p.fm.recall).toLowerCase() !== "false");
   const state = loadState();
-  const changed = changedPages(syncPages, state);
-  if (changed.length === 0) return { synced: 0, note: "无变更页面" };
-  const draft = { schema_version: "1", insights: generateDraft(changed) };
-  const tmp = join(STATE_DIR, "sync-draft-" + Date.now() + ".json");
-  mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(tmp, JSON.stringify(draft, null, 1));
-  let fake = null;
-  // 只有本地 Ollama 端点才需要"假 embedding 服务快速失败"；直连 OpenAI 兼容端点时不需要
+  const plan = [];
+  const forgetIds = [];
+  const nextPages = {};
+  const freshByPage = new Map();
+  for (const p of syncPages) {
+    const chunks = chunkPage(p);
+    const prev = state[p.rel];
+    const prevChunks = prev && Array.isArray(prev.chunks) ? prev.chunks : [];
+    const prevIds = new Map(prevChunks.map(c => [c.h, c.id]));
+    const hashes = new Set(chunks.map(c => c.hash));
+    const keep = [];
+    const fresh = [];
+    for (const c of chunks) {
+      const id = prevIds.get(c.hash);
+      if (id) keep.push({ h: c.hash, id });
+      else { fresh.push(c); plan.push(c); }
+    }
+    for (const c of prevChunks) if (!hashes.has(c.h) && c.id) forgetIds.push(c.id);
+    nextPages[p.rel] = { mtime: p.mtime, size: p.size, chunks: keep };
+    if (fresh.length) freshByPage.set(p.rel, fresh);
+  }
+  // 退出同步范围的页（被排除/recall:false/删除）：忘掉旧块
+  for (const rel of Object.keys(state)) {
+    if (nextPages[rel]) continue;
+    const prev = state[rel];
+    if (prev && Array.isArray(prev.chunks)) for (const c of prev.chunks) if (c.id) forgetIds.push(c.id);
+  }
+  if (plan.length === 0 && forgetIds.length === 0) return { synced: 0, chunks: 0, note: "无变更" };
+  const cli = mnemonCli();
+  const env = mnemonEnv();
+  let forgotten = 0;
+  for (const id of forgetIds) {
+    try { await execFileAsync(cli.command, ["forget", id], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) }); forgotten++; } catch {}
+  }
+  const imported = [];
+  let error;
   const endpoint = process.env.MNEMON_EMBED_ENDPOINT || process.env.EMBED_ENDPOINT || "https://api.siliconflow.cn/v1";
   const localEndpoint = /127\.0\.0\.1|localhost/i.test(endpoint);
+  let fake = null;
   if (localEndpoint && FAKE_EMBED !== "never") {
     const alive = await ollamaAlive();
     if (!alive) { fake = await startFakeEmbed().catch(e => { console.log("[sync] startFakeEmbed 失败:", String(e).slice(0, 80)); return null; }); }
   }
   try {
-    const cli = mnemonCli();
-    await execFileAsync(cli.command, ["import", tmp], {
-      timeout: 300000,
-      maxBuffer: 16 * 1024 * 1024,
-      env: mnemonEnv(),
-      ...(cli.shell ? { shell: true } : {}),
-    });
-  } catch (e) {
-    const tail = String(e.stdout || "").trim().slice(-150);
-    return { synced: 0, error: String(e.message || e).slice(0, 120) + (tail ? " | out:" + tail : "") };
+    for (let i = 0; i < plan.length; i += CHUNK_BATCH) {
+      const batch = plan.slice(i, i + CHUNK_BATCH);
+      const draft = { schema_version: "1", insights: batch.map(c => ({ content: c.content, category: c.category, importance: c.importance, tags: c.tags, entities: c.entities })) };
+      const tmp = join(STATE_DIR, "sync-draft-" + Date.now() + "-" + i + ".json");
+      mkdirSync(STATE_DIR, { recursive: true });
+      writeFileSync(tmp, JSON.stringify(draft, null, 1));
+      try {
+        const { stdout } = await execFileAsync(cli.command, ["import", tmp], { timeout: 600000, maxBuffer: 32 * 1024 * 1024, env, ...(cli.shell ? { shell: true } : {}) });
+        const text = String(stdout || "").trim();
+        const parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+        for (const r of parsed.results || []) {
+          const c = batch[r.index];
+          if (c && r.id) imported.push({ rel: c.rel, hash: c.hash, id: r.id });
+        }
+      } catch (e) {
+        const tail = String(e.stdout || "").trim().slice(-150);
+        error = String(e.message || e).slice(0, 120) + (tail ? " | out:" + tail : "");
+      } finally {
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+      if (error) break;
+    }
   } finally {
     if (fake) { try { fake.close(); } catch {} }
-    try { rmSync(tmp, { force: true }); } catch {}
   }
-  const ns = { ...state };
-  for (const p of changed) ns[p.rel] = { mtime: p.mtime, size: p.size };
-  saveState(ns);
-  return { synced: changed.length, changed: changed.map(p => p.rel).slice(0, 5) };
+  const idByKey = new Map(imported.map(x => [x.rel + "|" + x.hash, x.id]));
+  for (const [rel, fresh] of freshByPage) {
+    for (const c of fresh) {
+      const id = idByKey.get(rel + "|" + c.hash);
+      if (id) nextPages[rel].chunks.push({ h: c.hash, id });
+    }
+  }
+  saveState(nextPages);
+  return { synced: imported.length, chunks: plan.length, forgotten, pages: syncPages.length, ...(error ? { error } : {}) };
 }
 
 function appendLog(entry) {
@@ -810,10 +904,11 @@ async function main() {
   if (RUN.sync) {
     console.log("\n== sync ==");
     if (DRY) {
-      const syncPages = pages.filter(p => !["引用", "发现"].includes(p.cat));
-      const state = loadState(); const changed = changedPages(syncPages, state);
-      console.log("(--dry-run) 变更页面:", changed.length);
-      summary.push("sync(dry):" + changed.length);
+      const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && String(p.fm.recall).toLowerCase() !== "false");
+      let chunks = 0; const perCat = {};
+      for (const pg of syncPages) { const n = chunkPage(pg).length; chunks += n; perCat[pg.cat] = (perCat[pg.cat] || 0) + n; }
+      console.log("(--dry-run) 同步页:", syncPages.length, "H2 块:", chunks, JSON.stringify(perCat));
+      summary.push("sync(dry):" + chunks);
     } else {
       const r = await syncMemory(pages);
       console.log("同步:", JSON.stringify(r));
