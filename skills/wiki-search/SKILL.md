@@ -9,8 +9,9 @@ description: 在 LLM-Wiki 知识库（D:\\DB\\Obsidian\\LLM-Wiki）中检索知�
 >
 > **检索路由**：当天/精确/排错 → 本技能（grep + read 原文）；跨天/联想/找经验 → `mnemon_recall`；项目档案 → `mnemon_document_search`。
 > mnemon 按 H2 小节切块，命中形如 `[页面｜小节] …（来源: path#小节）`，按该路径回 wiki 精读对应小节。
+> `status: archived` 的页面仍可 grep 到，但默认优先非 archived；它们不参与 mnemon 同步，回答时注明「已归档」。
 
-## 库结构（12 分类，根：`D:\DB\Obsidian\LLM-Wiki\wiki\`）
+## 库结构（11 分类，根：`D:\DB\Obsidian\LLM-Wiki\wiki\`）
 
 | 分类 | 目录 | 内容 |
 |---|---|---|

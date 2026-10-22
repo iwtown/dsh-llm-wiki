@@ -87,6 +87,8 @@ cd dsh-llm-wiki
 | 技能 | `$env:USERPROFILE\.agents\skills\wiki-search\`、`wiki-write\` |
 | 管线 | `$env:USERPROFILE\.dsh\bin\llm-wiki-pipeline.mjs` |
 | 定时 | 计划任务 `LLM-Wiki Pipeline`（10:00 每日） |
+| 偏好蒸馏 | `$env:USERPROFILE\.dsh\bin\profile-distill.mjs` |
+| 周任务 | 计划任务 `Profile Distill`（周日 09:00） |
 
 桌面版适配要点（0.8.0）：
 
@@ -115,7 +117,15 @@ node ~/bin/llm-wiki-pipeline.mjs --usage         # 回写召回热度到 frontma
 node ~/bin/llm-wiki-pipeline.mjs --dsh-export    # 导出 DSH 会话到 raw/sessions/dsh/
 node ~/bin/llm-wiki-pipeline.mjs --all           # 全量执行（含 --prune-memory）
 node ~/bin/llm-wiki-pipeline.mjs --all --dry-run # 预览模式（零写入）
+node ~/bin/profile-distill.mjs --since 7d        # 只读产 USER.md 候选
 ```
+
+### 偏好蒸馏（profile-distill.mjs）
+
+- 从最近会话、记忆空间 `preference`、USER.md 只读生成候选：`reports/profile-candidate-<date>.md/json`；
+- 不写 USER.md；USER.md 是 mnemon 投影，只能经 `mnemon_runtime_memory` 写；
+- 新增可自动、修改/删除需确认；Windows 安装会注册周日 09:00 的 `Profile Distill` 计划任务；
+- `status: archived` 与 `recall: false` 的页面不参与同步。
 
 ## 配置（环境变量）
 
@@ -125,6 +135,11 @@ node ~/bin/llm-wiki-pipeline.mjs --all --dry-run # 预览模式（零写入）
 | LLM_WIKI_STATE | ~/.dsh/llm-wiki/pipeline-state.json | 管线增量状态文件 |
 | EMBED_KEY | 读 ~/.modlens/config.json | SiliconFlow API key |
 | EMBED_MODEL | BAAI/bge-m3 | 向量模型 |
+| LLM_WIKI_SYNC_EXCLUDE | 引用,发现 | 不参与 mnemon 同步的分类 |
+| LLM_WIKI_CHUNK_MIN | 40 | 小节最小字符数（中文短节也能入库） |
+| LLM_WIKI_CHUNK_MAX | 1200 | 单块最大字符数 |
+| LLM_WIKI_CHUNK_PER_PAGE | 12 | 每页最多块数 |
+| LLM_WIKI_CHUNK_BATCH | 40 | 每批导入块数 |
 
 ## wiki 结构
 
@@ -143,7 +158,7 @@ LLM-Wiki/
 │   ├── patterns/            # WikiSkill 模式页（管线 --compile-patterns 自动生成）
 │   │   ├── TEMPLATE.md      # Pattern 页模板
 │   │   └── *-pattern.md     # 自动生成的可复用经验页
-│   └── <12 分类>/           # 发现/决策/概念/流程/命令/规则/提示/记忆/项目/引用/索引/基因
+│   └── <11 分类>/           # 发现/决策/概念/流程/命令/规则/提示/记忆/项目/引用/基因
 └── skills/                  # [Skills Layer] 可执行技能追溯（扩展点）
     └── _template/PURPOSE.md # Skill 回溯到 inspire 它的 pattern 页
 ```

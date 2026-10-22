@@ -31,6 +31,12 @@ description: 向 LLM-Wiki 知识库（D:\\DB\\Obsidian\\LLM-Wiki）写入新知�
 5. **汇报**：告知用户写入路径 + 关联了哪些旧页。
 6. **同步与经验**：写入后运行 `node "$env:USERPROFILE\.dsh\bin\llm-wiki-pipeline.mjs" --sync`（按 H2 块哈希增量同步，只导入新增/改动的小节）。如果本次还产生了 wiki 装不下的可复用经验（判断依据、踩坑教训），再单独 `mnemon_remember` 一条，内容自包含并带上本页路径。
 
+## 归档与退出同步
+
+- 页面不再维护但要保留内容：frontmatter 加 `status: archived`。archived 页不参与 lint / orphan / stale 统计，也不进入 mnemon 同步，但仍可被 grep 检索。
+- 个人画像、敏感偏好等不该进入记忆空间的页面：加 `recall: false`，内容只留在 wiki。
+- 归档不删除内容；要彻底移除先确认用户。
+
 ## frontmatter 模板（OKF v0.2）
 
 ```yaml
