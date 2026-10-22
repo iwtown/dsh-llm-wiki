@@ -263,7 +263,7 @@ function compilePatterns(pages) {
   mkdirSync(evolutionDir, { recursive: true });
   const orphanPages = [];
   for (const pg of pages) {
-    if (pg.cat === "索引") continue;
+    if (pg.cat === "索引" || pg.fm.status === "archived") continue;
     const body = pg.content.slice(pg.fmEnd + 4);
     const linkCount = (body.match(/\[\[/g) || []).length;
     if (linkCount === 0) orphanPages.push(pg);
