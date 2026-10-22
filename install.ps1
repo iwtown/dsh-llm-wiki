@@ -57,6 +57,7 @@ Write-Host "==> 3/4 scripts -> $DshHome\bin"
 New-Item -ItemType Directory -Force -Path (Join-Path $DshHome "bin") | Out-Null
 Copy-Item (Join-Path $Repo "scripts\llm-wiki-pipeline.mjs") (Join-Path $DshHome "bin\llm-wiki-pipeline.mjs") -Force
 Copy-Item (Join-Path $Repo "scripts\embed-proxy.mjs")       (Join-Path $DshHome "bin\embed-proxy.mjs") -Force
+Copy-Item (Join-Path $Repo "scripts\profile-distill.mjs")   (Join-Path $DshHome "bin\profile-distill.mjs") -Force
 
 Write-Host "==> 4/4 daily task (10:00)"
 if (-not $NoSchedule) {
