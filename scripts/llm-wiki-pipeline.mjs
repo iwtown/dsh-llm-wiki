@@ -575,18 +575,21 @@ function lint(pages) {
   const issues = [];
   const links = new Map();
   for (const p of pages) {
-    // OKF 结构检查
-    const content = p.content;
-    if (!content.startsWith("---")) issues.push({ type: "okf", path: p.rel, message: "frontmatter 不在文件开头" });
-    else {
-      const closing = content.indexOf("\n---", 4);
-      if (closing < 0) issues.push({ type: "okf", path: p.rel, message: "frontmatter 无 closing ---" });
+    const archived = p.fm.status === "archived";
+    if (!archived) {
+      // OKF 结构检查（archived 页不参与质量统计）
+      const content = p.content;
+      if (!content.startsWith("---")) issues.push({ type: "okf", path: p.rel, message: "frontmatter 不在文件开头" });
+      else {
+        const closing = content.indexOf("\n---", 4);
+        if (closing < 0) issues.push({ type: "okf", path: p.rel, message: "frontmatter 无 closing ---" });
+      }
+      for (const f of ["title", "type", "created"]) {
+        if (!p.fm[f]) issues.push({ type: "missing_frontmatter", path: p.rel, message: "缺 " + f });
+      }
+      const wl = (p.content.match(/\[\[[^\]]+\]\]/g) || []).length;
+      if (wl < 2) issues.push({ type: "few_wikilinks", path: p.rel, message: "wikilink " + wl });
     }
-    for (const f of ["title", "type", "created"]) {
-      if (!p.fm[f]) issues.push({ type: "missing_frontmatter", path: p.rel, message: "缺 " + f });
-    }
-    const wl = (p.content.match(/\[\[[^\]]+\]\]/g) || []).length;
-    if (wl < 2) issues.push({ type: "few_wikilinks", path: p.rel, message: "wikilink " + wl });
     for (const m of p.content.matchAll(/\[\[([^\]#|]+)/g)) {
       const t = m[1].trim();
       if (!links.has(t)) links.set(t, new Set());
@@ -595,7 +598,7 @@ function lint(pages) {
   }
   const graceCut = new Date(); graceCut.setDate(graceCut.getDate() - 7);
   const orphans = pages.filter(p => {
-    if (p.cat === "引用" || p.cat === "索引") return false;
+    if (p.cat === "引用" || p.cat === "索引" || p.fm.status === "archived") return false;
     // 新页面宽限期：创建/更新在 7 天内不算孤立（等入链自然形成）
     const d = p.fm.updated || p.fm.created;
     if (d && new Date(d) > graceCut) return false;
@@ -604,6 +607,7 @@ function lint(pages) {
   });
   const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - STALE_DAYS);
   const stale = pages.filter(p => {
+    if (p.fm.status === "archived") return false;
     const u = p.fm.updated || p.fm.created;
     return u && new Date(u) < cutoff && p.fm.status !== "stale";
   });
@@ -681,6 +685,7 @@ function splitLong(text, max) {
 }
 /** 把一页拆成 H2 块；页面 frontmatter 里 recall: false 可退出同步。 */
 function chunkPage(p) {
+  if (p.fm.status === "archived") return [];
   if (String(p.fm.recall).toLowerCase() === "false") return [];
   const title = p.fm.title || p.file.replace(/\.md$/, "");
   const qs = Number(p.fm.quality_score);
@@ -781,7 +786,7 @@ async function ollamaAlive() {
   }).catch(() => false);
 }
 async function syncMemory(pages) {
-  const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && String(p.fm.recall).toLowerCase() !== "false");
+  const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && p.fm.status !== "archived" && String(p.fm.recall).toLowerCase() !== "false");
   const state = loadState();
   const plan = [];
   const forgetIds = [];
@@ -994,7 +999,7 @@ async function main() {
   if (RUN.sync) {
     console.log("\n== sync ==");
     if (DRY) {
-      const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && String(p.fm.recall).toLowerCase() !== "false");
+      const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && p.fm.status !== "archived" && String(p.fm.recall).toLowerCase() !== "false");
       let chunks = 0; const perCat = {};
       for (const pg of syncPages) { const n = chunkPage(pg).length; chunks += n; perCat[pg.cat] = (perCat[pg.cat] || 0) + n; }
       console.log("(--dry-run) 同步页:", syncPages.length, "H2 块:", chunks, JSON.stringify(perCat));
