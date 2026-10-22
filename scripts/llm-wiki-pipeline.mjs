@@ -707,7 +707,7 @@ async function ollamaAlive() {
   }).catch(() => false);
 }
 async function syncMemory(pages) {
-  const syncPages = pages.filter(p => p.cat !== "引用" && !(p.cat === "发现" && p.file.includes("会话复盘")));
+  const syncPages = pages.filter(p => !["引用", "发现"].includes(p.cat));
   const state = loadState();
   const changed = changedPages(syncPages, state);
   if (changed.length === 0) return { synced: 0, note: "无变更页面" };
@@ -810,7 +810,7 @@ async function main() {
   if (RUN.sync) {
     console.log("\n== sync ==");
     if (DRY) {
-      const syncPages = pages.filter(p => p.cat !== "引用" && !(p.cat === "发现" && p.file.includes("会话复盘")));
+      const syncPages = pages.filter(p => !["引用", "发现"].includes(p.cat));
       const state = loadState(); const changed = changedPages(syncPages, state);
       console.log("(--dry-run) 变更页面:", changed.length);
       summary.push("sync(dry):" + changed.length);
