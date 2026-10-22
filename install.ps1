@@ -84,6 +84,27 @@ if (-not $NoSchedule) {
   }
 }
 
+Write-Host "==> 5/5 weekly profile distill (Sun 09:00)"
+if (-not $NoSchedule) {
+  $node2 = (Get-Command node -ErrorAction SilentlyContinue).Source
+  if ($node2) {
+    $wrapper2 = Join-Path $DshHome "bin\profile-distill-cron.cmd"
+    $logDir2 = Join-Path $DshHome "profile-distill"
+    New-Item -ItemType Directory -Force -Path $logDir2 | Out-Null
+    $log2 = Join-Path $logDir2 "cron.log"
+    $lines2 = @(
+      "@echo off",
+      "if not exist ""$logDir2"" mkdir ""$logDir2""",
+      "echo [%DATE% %TIME%] start >> ""$log2""",
+      """" + $node2 + """ """ + (Join-Path $DshHome "bin\profile-distill.mjs") + """ --since 7d --out ""D:\DB\DSH\reports"" >> ""$log2"" 2>&1",
+      "echo [%DATE% %TIME%] exit=%ERRORLEVEL% >> ""$log2"""
+    )
+    Set-Content -Path $wrapper2 -Value $lines2 -Encoding ascii
+    schtasks /Create /TN "Profile Distill" /TR ('"' + $wrapper2 + '"') /SC WEEKLY /D SUN /ST 09:00 /F | Out-Null
+    Write-Host "    weekly task created (Sun 09:00, logs -> $log2)"
+  }
+}
+
 Write-Host ""
 Write-Host "Done."
 Write-Host "  vault: $Vault"
