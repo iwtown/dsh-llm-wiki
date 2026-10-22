@@ -463,7 +463,7 @@ const DOCS_DIR = join(homedir(), ".mnemon/documents/active");
 
 function docCategory(title) {
   if (/计划|规划|方案|调研|决策|适配|评估/.test(title)) return "决策";
-  if (/接入|部署|配置|环境|发布|导航|优化/.test(title)) return "项目";
+  if (/接入|部署|配置|环境|发布|导航|优化|手册|运维|运行|指南|流程/.test(title)) return "项目";
   if (/准则|原则|规范|参考|收录/.test(title)) return "引用";
   return "概念";
 }
