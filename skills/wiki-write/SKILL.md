@@ -29,6 +29,7 @@ description: 向 LLM-Wiki 知识库（D:\\DB\\Obsidian\\LLM-Wiki）写入新知�
 3. **写文件**：路径 `wiki/<分类>/<中文标题>.md`；frontmatter 按下方模板。
 4. **关联**：body 里 >=2 条 [[wikilinks]] 指向相关旧页面（`related` 字段也填）；用 `grep` 工具找可关联的旧页。
 5. **汇报**：告知用户写入路径 + 关联了哪些旧页。
+6. **同步与经验**：写入后运行 `node "$env:USERPROFILE\.dsh\bin\llm-wiki-pipeline.mjs" --sync`（按 H2 块哈希增量同步，只导入新增/改动的小节）。如果本次还产生了 wiki 装不下的可复用经验（判断依据、踩坑教训），再单独 `mnemon_remember` 一条，内容自包含并带上本页路径。
 
 ## frontmatter 模板（OKF v0.2）
 

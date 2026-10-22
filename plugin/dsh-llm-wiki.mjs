@@ -83,7 +83,8 @@ export function apply(ctx, config = {}) {
       if (!isMainAgent(context)) return "";
       const idx = readPreview();
       if (!idx) return "";
-      return "\n---\n# LLM-Wiki 知识库（管线自动维护）\n\n" + idx + "\n---\n";
+      return "\n---\n# LLM-Wiki 知识库（管线自动维护）\n\n" + idx +
+        "\n\n**检索路由**：当天/精确/排错 → wiki-search（grep + read 原文）；跨天/联想/找经验 → mnemon_recall；项目档案 → mnemon_document_search。\n---\n";
     },
   }), "dsh-llm-wiki.prompt.preview");
 
@@ -114,7 +115,8 @@ export function apply(ctx, config = {}) {
     if (now - lastRun < COOLDOWN_MS) return;
     running = true;
     lastRun = now;
-    const child = spawn(process.execPath, [PIPELINE, "--all"], {
+    // 会话结束只做增量同步；全量巡检交给每日 10:00 的计划任务
+    const child = spawn(process.execPath, [PIPELINE, "--sync"], {
       stdio: "ignore",
       detached: true,
       windowsHide: true,

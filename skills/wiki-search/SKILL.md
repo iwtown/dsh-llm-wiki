@@ -6,6 +6,9 @@ description: 在 LLM-Wiki 知识库（D:\\DB\\Obsidian\\LLM-Wiki）中检索知�
 # LLM-Wiki 知识检索
 
 > LLM-Wiki 是 Karpathy 模式的 Obsidian 知识库（800+ 页，管线自动编译）。检索纪律：**先搜索、后精读、引用原文路径，禁止凭记忆编造知识库内容**。
+>
+> **检索路由**：当天/精确/排错 → 本技能（grep + read 原文）；跨天/联想/找经验 → `mnemon_recall`；项目档案 → `mnemon_document_search`。
+> mnemon 按 H2 小节切块，命中形如 `[页面｜小节] …（来源: path#小节）`，按该路径回 wiki 精读对应小节。
 
 ## 库结构（12 分类，根：`D:\DB\Obsidian\LLM-Wiki\wiki\`）
 
