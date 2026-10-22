@@ -632,7 +632,7 @@ const MNEMON_IMPORTANCE = { 规则: 5, 决策: 4, 项目: 3, 发现: 3, 概念: 
 const SYNC_EXCLUDE = new Set((process.env.LLM_WIKI_SYNC_EXCLUDE || "引用,发现").split(",").map(s => s.trim()).filter(Boolean));
 const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 80);
 const CHUNK_MAX = Number(process.env.LLM_WIKI_CHUNK_MAX || 1200);
-const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 6);
+const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 12);
 const CHUNK_BATCH = Number(process.env.LLM_WIKI_CHUNK_BATCH || 40);
 const SKIP_SECTION = /^(相关|参考|来源|变更|更新记录|附录|目录)/;
 
@@ -680,6 +680,8 @@ function chunkPage(p) {
     const text = sec.lines.join("\n").trim();
     if (text.length < CHUNK_MIN) continue;
     if (sec.heading && SKIP_SECTION.test(sec.heading.trim())) continue;
+    // 过滤早期 pi 会话批量导入的转储页：没有知识价值，只会污染召回
+    if (/批量导入 — 来自|🤖 批量导入|自动编译自 \[\[raw\/sessions/.test(text)) continue;
     for (const piece of splitLong(text, CHUNK_MAX)) {
       const bodyText = piece.trim();
       if (bodyText.length < CHUNK_MIN) continue;
@@ -788,8 +790,12 @@ async function syncMemory(pages) {
   if (plan.length === 0 && forgetIds.length === 0) return { synced: 0, chunks: 0, note: "无变更" };
   const cli = mnemonCli();
   const env = mnemonEnv();
+  // 同一块可能被多页引用（内容去重后共享 id），只忘掉不再被任何页引用的
+  const keepIds = new Set();
+  for (const v of Object.values(nextPages)) for (const c of v.chunks) keepIds.add(c.id);
+  const toForget = forgetIds.filter(id => !keepIds.has(id));
   let forgotten = 0;
-  for (const id of forgetIds) {
+  for (const id of toForget) {
     try { await execFileAsync(cli.command, ["forget", id], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) }); forgotten++; } catch {}
   }
   const imported = [];
