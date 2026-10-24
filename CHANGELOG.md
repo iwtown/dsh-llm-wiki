@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.6 — 2026-10-24
+
+- schema 关键词补充：候选方案/对比/技术栈/优缺点（work.approach）。
+- 配合“新领域先给 2 个候选方案对比”偏好。
+
 ## 0.10.5 — 2026-10-24
 
 - schema 关键词补充：调研/已有方案/评估（work.approach）、目标/验收/瞎猜（work.plan_first）、边界/前提/适用范围（comm.answer_first）。
