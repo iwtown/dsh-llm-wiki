@@ -37,7 +37,8 @@ $tok = (($cred | Select-String '^password=').Line -replace '^password=', '').Tri
 if (-not $tok) { throw 'no GitHub token from git credential' }
 $h = @{ 'User-Agent' = 'dsh-agent'; 'Authorization' = 'Bearer ' + $tok; 'Accept' = 'application/vnd.github+json' }
 $payload = @{ tag_name = ('v' + $Version); name = ('v' + $Version); body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json -Depth 4
-$rel = Invoke-RestMethod -Method Post -Uri 'https://api.github.com/repos/iwtown/dsh-llm-wiki/releases' -Headers $h -ContentType 'application/json' -Body $payload -TimeoutSec 40
+$bodyBytes = [Text.Encoding]::UTF8.GetBytes($payload)
+$rel = Invoke-RestMethod -Method Post -Uri 'https://api.github.com/repos/iwtown/dsh-llm-wiki/releases' -Headers $h -ContentType 'application/json; charset=utf-8' -Body $bodyBytes -TimeoutSec 40
 $latest = Invoke-RestMethod -Uri 'https://api.github.com/repos/iwtown/dsh-llm-wiki/releases/latest' -Headers $h -TimeoutSec 30
 if ($latest.tag_name -ne ('v' + $Version)) { throw ('latest release mismatch: ' + $latest.tag_name) }
 Write-Host ('released ' + $Version + ' -> ' + $rel.html_url)
