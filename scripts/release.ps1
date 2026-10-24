@@ -27,6 +27,12 @@ if ($j0 -lt 0 -or $j1 -le $j0) { throw 'eval-profile produced no JSON' }
 $ev = $evalRaw.Substring($j0, $j1 - $j0 + 1) | ConvertFrom-Json
 if ([int]$ev.rate -ne 100) { throw ('profile eval gate failed: ' + $ev.rate + '%') }
 Write-Host ('    eval ' + $ev.pass + '/' + $ev.cases)
+$retRaw = & node (Join-Path $Repo 'scripts\eval-retrieval.mjs') 2>&1 | Out-String
+$r0 = $retRaw.IndexOf('{'); $r1 = $retRaw.LastIndexOf('}')
+if ($r0 -lt 0 -or $r1 -le $r0) { throw 'eval-retrieval produced no JSON' }
+$rv = $retRaw.Substring($r0, $r1 - $r0 + 1) | ConvertFrom-Json
+if ([int]$rv.rate -ne 100) { throw ('retrieval eval gate failed: ' + $rv.rate + '%') }
+Write-Host ('    retrieval ' + $rv.pass + '/' + $rv.cases)
 
 $cl = [IO.File]::ReadAllText((Join-Path $Repo 'CHANGELOG.md'), [Text.Encoding]::UTF8)
 $m = [regex]::Match($cl, '(?ms)^## ' + [regex]::Escape($Version) + ' [^\r\n]*\r?\n(.*?)(?=^## |\z)')

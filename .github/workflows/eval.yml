@@ -20,6 +20,11 @@ jobs:
           for f in scripts/*.mjs plugin/*.mjs; do node --check "$f"; done
       - name: Profile decision eval
         run: node scripts/eval-profile.mjs | tee eval.json
+      - name: Retrieval fixture eval
+        run: node scripts/eval-retrieval.mjs | tee retrieval.json
+      - name: Enforce retrieval 100%
+        run: |
+          node -e "const r=require('fs').readFileSync('retrieval.json','utf8'); const j=JSON.parse(r.slice(r.indexOf('{'),r.lastIndexOf('}')+1)); if(j.rate!==100){console.error('retrieval rate='+j.rate);process.exit(1)} console.log('retrieval 100% ('+j.cases+' cases)')"
       - name: Enforce 100% pass
         run: |
           node -e "const r=require('fs').readFileSync('eval.json','utf8'); const j=JSON.parse(r.slice(r.indexOf('{'),r.lastIndexOf('}')+1)); if(j.rate!==100){console.error('eval rate='+j.rate);process.exit(1)} console.log('eval 100% ('+j.cases+' cases)')"

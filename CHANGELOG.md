@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.3 — 2026-10-24
+
+- 新增 eval-retrieval.mjs：6 条 fixture 查询跑 BM25 检索，检查 top-3 命中，无网络/无 mnemon。
+- GitHub Actions 增加检索评测步骤，强制 100%。
+- release.ps1 改为双门禁：画像决策 12/12 + 检索 6/6。
+- README 组件表补充检索评测。
+
 ## 0.10.2 — 2026-10-24
 
 - 画像决策评测从 8 扩到 **12 用例**：更新变体、unclassified、ORPHAN、单会话阈值。

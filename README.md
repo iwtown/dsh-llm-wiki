@@ -50,7 +50,8 @@
 | 查询路由 | `scripts/wiki-router.mjs` | 同上 |
 | 画像抽取 | `scripts/profile-extract.mjs` | 同上 |
 | 画像本体 | `scripts/profile-schema.json` | 同上（12 槽 = 6 域 × 2） |
-| 决策评测 | `scripts/eval-profile.mjs` | 开发/CI 用，8 个隔离用例 |
+| 决策评测 | `scripts/eval-profile.mjs` | 开发/CI 用，12 个隔离用例 |
+| 检索评测 | `scripts/eval-retrieval.mjs` | 开发/CI 用，6 个 fixture 查询（BM25） |
 | 画像蒸馏 | `scripts/profile-distill.mjs` | 同上 |
 | 编译候选 | `scripts/session-compile-candidates.mjs` | 同上 |
 | stale 复核 | `scripts/stale-review.mjs` | 同上 |
@@ -212,6 +213,7 @@ dsh-llm-wiki/
 
 ## 版本
 
+- `0.10.3`：CI 增加检索 fixture 评测（6 用例，BM25）+ 本地发版双门禁。
 - `0.10.0`：画像本体（12 槽）+ 决策标签 + 引文保真 + 决策引擎评测 8/8；安装脚本同步 schema。
 - `0.9.0`：检索路由 + 融合检索；画像 v3（证据管线/复核/预算）；编译候选、stale 复核、健康快照；发现分级同步；会话编译提示。
 - `0.8.0`：DSH 桌面版适配（zstd、mnemon.exe、embedding 注入、Windows 任务）。

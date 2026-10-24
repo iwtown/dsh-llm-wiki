@@ -24,8 +24,8 @@
 
 ## 2.5 自动门禁（CI）
 
-- [ ] GitHub Actions `eval-profile` 为绿色（push/PR 触发，强制 8/8）
-- [ ] 本地 `scripts/release.ps1` 会先跑同一套 eval，未 100% 直接拒绝发布
+- [ ] GitHub Actions `eval` 为绿色（画像 12/12 + 检索 6/6）
+- [ ] 本地 `scripts/release.ps1` 双门禁通过（画像 + 检索），未 100% 直接拒绝发布
 
 ## 3. 提交与打标
 
