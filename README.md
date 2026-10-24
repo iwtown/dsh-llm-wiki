@@ -1,207 +1,203 @@
 # dsh-llm-wiki
 
-> Karpathy LLM Wiki 模式的 DeepSeek Harness 知识库系统：模型写 wiki、管线维护、记忆体召回、质量闭环。
-> 对齐 [Google Research WikiSkill](https://arxiv.org/abs/2608.27454) 三层架构 + [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format) 知识格式规范。
+> 让 Agent 拥有一个**会自己长大、也会自己变老**的知识库。
+> Karpathy LLM Wiki 模式 × DeepSeek Harness：模型写页、管线维护、记忆体召回、质量闭环。
 
-基于 [Karpathy 的 LLM Wiki 理念](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 的 Obsidian 知识库自动化方案。整套系统由 **1 个极简插件 + 2 个技能 + 1 个管线脚本 + 1 个向量代理服务** 组成，刻意保持低代码、零第三方插件依赖。
+基于 [Karpathy 的 LLM Wiki 理念](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)，对齐 [Google Research WikiSkill](https://arxiv.org/abs/2608.27454) 三层架构与 [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format) 知识格式。
+
+---
+
+## 它解决什么问题
+
+- **Agent 会忘**：会话结束即失忆 → 把决策、排错、可复用结论编译成 wiki 页，形成持久证据。
+- **旧答案反复出现**：没有保鲜机制 → stale 页面定期复核、降级、归档。
+- **偏好要反复解释**：偏好散落在对话里 → 从会话抽取证据，蒸馏成 USER.md 规则（每轮注入）。
+
+## 设计原则
+
+1. **三层分工**：`raw/`（原始素材，永不删除）→ `wiki/`（模型维护的真相源）→ `schema.md`（写页/检索纪律）。
+2. **低代码、零第三方依赖**：1 个插件 + 2 个技能 + 若干零依赖 Node 脚本；不引入向量库/数据库。
+3. **只读优先**：蒸馏、stale 复核、编译候选都只产清单；写 USER.md / 归档页面必须经确认。
+4. **可审计、可重建**：wiki 是 git 仓库；mnemon 索引可从 wiki 重建；每次自动化都写日志。
 
 ## 架构
 
 ```
-写：wiki-write SKILL → 模型会话内写 Obsidian wiki 页面（frontmatter/wikilink 规范）
-管：llm-wiki-pipeline.mjs（lint/okf/compile-patterns/索引/记忆体同步/usage/rate，零依赖，幂等）
-     ├─ systemd timer 每日 10:00 自动运行
-     └─ 插件 session/disposed 事件触发（60s 防重入）
-记：mnemon 记忆体（向量语义召回）
-读：wiki-search SKILL（rg + read 检索原文）
-馈：--rate 质量反馈 / --usage 召回热度回写 queried_count
-编：--compile-patterns 从孤立节点聚类生成 pattern 页（WikiSkill 核心创新）
-向：embed-proxy.mjs（Ollama 兼容代理 → SiliconFlow /v1/embeddings，可选）
+写   wiki-write SKILL ──────────────► wiki/ 页面（frontmatter / wikilink / OKF v0.2）
+管   llm-wiki-pipeline.mjs ─────────► lint / okf / index / sync / usage / compile-patterns
+     ├─ 每日 10:00 计划任务            / docs-sync / dsh-export / prune / reconcile
+     └─ 插件 session/disposed（增量）
+记   mnemon（bge-m3 向量）◄────────── H2 块 + 语义边（可重建）
+读   wiki-router.mjs → wiki-retrieval.mjs（BM25 + 向量融合 RRF）
+     └─ session / live / docs / hot 四路分流
+馈   --rate useful|outdated ────────► quality_score / queried_count
+编   --compile-patterns ────────────► 孤立页聚类成 pattern 页
+像   profile-extract → profile-distill ─► 候选 → USER.md（规则）/ 画像页（证据）
+养   compile-candidates / stale-review / pipeline-health ─► 候选清单 / 复核清单 / 健康 CSV
 ```
 
-| 组件 | 文件 | 部署位置 |
+## 组件
+
+| 组件 | 文件 | 部署位置（Windows 桌面版） |
 |---|---|---|
-| 生命周期插件 | plugin/dsh-llm-wiki.mjs | `$DSH_HOME/profiles/<profile>/`（cordis.patch.yml 挂载；桌面版为 desktop） |
-| 检索技能 | skills/wiki-search/SKILL.md | `~/.agents/skills/wiki-search/` |
-| 写入技能 | skills/wiki-write/SKILL.md | `~/.agents/skills/wiki-write/` |
-| 管线 | scripts/llm-wiki-pipeline.mjs | `$DSH_HOME/bin/`（WSL 旧布局为 `~/bin/`） |
-| 向量代理（可选，旧方案） | scripts/embed-proxy.mjs | 仅当 embedding 端点只认 Ollama 协议时需要；mnemon 0.5+ 直连 OpenAI 兼容端点时不需要 |
-| 定时（Linux） | systemd/llm-wiki-pipeline.timer | `~/.config/systemd/user/`；Windows 用 `install.ps1` 建计划任务 |
-
-## 依赖
-
-- dsh >= 0.2.0-rc.1（web 或 desktop profile；0.1.7 亦可）
-- Node.js >= 22.15（管线用 `node:sqlite` 与 `zlib.zstdDecompressSync`；DSH 内置 24.x 满足）
-- ripgrep（可选：DSH 的 `grep` 工具自带 ripgrep；只有命令行检索才需要 PATH 上的 `rg`）
-- mnemon CLI + dsh-mnemon 插件（记忆体）
-- Obsidian vault（wiki 页面），目录结构见 [wiki 结构](#wiki-结构)
-- SiliconFlow API key（可选，用于向量召回；复用 ~/.modlens/config.json 或环境变量 EMBED_KEY）
+| 生命周期插件 | `plugin/dsh-llm-wiki.mjs` | `%USERPROFILE%\.dsh\profiles\desktop\` |
+| 写入技能 | `skills/wiki-write/SKILL.md` | `%USERPROFILE%\.agents\skills\wiki-write\` |
+| 检索技能 | `skills/wiki-search/SKILL.md` | `%USERPROFILE%\.agents\skills\wiki-search\` |
+| 管线 | `scripts/llm-wiki-pipeline.mjs` | `%USERPROFILE%\.dsh\bin\` |
+| 融合检索 | `scripts/wiki-retrieval.mjs` | 同上 |
+| 查询路由 | `scripts/wiki-router.mjs` | 同上 |
+| 画像抽取 | `scripts/profile-extract.mjs` | 同上 |
+| 画像蒸馏 | `scripts/profile-distill.mjs` | 同上 |
+| 编译候选 | `scripts/session-compile-candidates.mjs` | 同上 |
+| stale 复核 | `scripts/stale-review.mjs` | 同上 |
+| 健康快照 | `scripts/pipeline-health.mjs` | 同上 |
+| 向量代理（可选） | `scripts/embed-proxy.mjs` | 仅在 embedding 端点只认 Ollama 协议时需要 |
+| 定时（Linux） | `systemd/*` | `~/.config/systemd/user/` |
+| 安装脚本 | `install.sh` / `install.ps1` | 复制组件 + 建计划任务 |
 
 ## 安装
 
-**方式 A：bundle 包（推荐，含插件）**
+> **平台范围**：Windows 桌面版为优先支持路径（插件 + 技能 + 9 个脚本 + 5 个计划任务）。Linux/WSL 目前 `install.sh` 只覆盖插件、技能、管线与 systemd 的 pipeline timer；编译候选、stale 复核、健康快照三个周任务**未随仓库提供 systemd timer**，需要时自行加。
+
+**方式 A：bundle（只装插件）**
 
 ```bash
 dsh plugin --profile web add github:iwtown/dsh-llm-wiki
 ```
 
-然后安装 SKILL / 管线 / systemd 服务（install.sh 只做这一步也行）：
+**方式 B：全量本地部署（推荐）**
 
 ```bash
 git clone https://github.com/iwtown/dsh-llm-wiki.git
-cd dsh-llm-wiki && ./install.sh
-systemctl --user restart dsh-web   # 让插件生效
+cd dsh-llm-wiki && ./install.sh          # Linux / WSL
+# 或
+.\install.ps1                             # Windows（-NoSchedule 跳过定时任务）
 ```
 
-**方式 B：install.sh 全量本地部署**（插件为 profile 本地文件，零 npm/零 node_modules，最反脆弱）
+然后重启 `dsh web` 让插件生效，并首次全量同步：
 
 ```bash
-git clone https://github.com/iwtown/dsh-llm-wiki.git
-cd dsh-llm-wiki && ./install.sh
-systemctl --user restart dsh-web
+node ~/.dsh/bin/llm-wiki-pipeline.mjs --all
+node ~/.dsh/bin/pipeline-health.mjs       # 生成首份健康快照
 ```
 
-`install.sh` 会把各组件复制到标准位置并启用 systemd 服务。然后：
+### 计划任务（Windows）
 
-1. **配置 vault 路径**：Linux/WSL 默认 `/mnt/d/DB/Obsidian/LLM-Wiki`，Windows 默认 `D:\DB\Obsidian\LLM-Wiki`（管线可用 `LLM_WIKI_VAULT` 覆盖；插件在 cordis.patch.yml 的 `config.vault` 覆盖；**SKILL 文件中的路径需按本机修改**）
-2. **首次记忆体同步**：`node $DSH_HOME/bin/llm-wiki-pipeline.mjs --sync`（WSL 为 `~/bin/`；把 wiki 精华导入 mnemon）
-3. **可选向量**：mnemon 0.5+ 可直接用 OpenAI 兼容端点（endpoint 以 `/v1` 结尾）；只有端点只认 Ollama 协议时才需要 embed-proxy
+| 任务 | 时间 | 作用 |
+|---|---|---|
+| LLM-Wiki Pipeline | 每日 10:00 | `--all` + 健康快照 |
+| Profile Distill | 周日 09:00 | 画像候选 |
+| LLM-Wiki Compile Candidates | 周日 09:20 | 未编译会话候选 |
+| LLM-Wiki Stale Review | 周日 09:40 | stale Top20 复核清单 |
+| Mnemon Backup | 每日 10:30 | mnemon 快照（独立组件，不由本仓库安装） |
 
-### Windows / DSH 桌面版
+## 管线命令
 
-DSH 桌面版（profile `desktop`）在 Windows 上没有 systemd、没有 `~/bin`，且 Node 由应用内置。用 PowerShell 安装：
-
-```powershell
-git clone https://github.com/iwtown/dsh-llm-wiki.git
-cd dsh-llm-wiki
-.\install.ps1                 # 插件 + 技能 + 管线 + 每日 10:00 计划任务
-# .\install.ps1 -NoSchedule   # 不建计划任务
-# .\install.ps1 -Uninstall    # 卸载（patch 里的 insert 需手动删）
-```
-
-安装后的位置：
-
-| 组件 | Windows 位置 |
+| 命令 | 作用 |
 |---|---|
-| 插件 | `$env:USERPROFILE\.dsh\profiles\desktop\dsh-llm-wiki.mjs` |
-| 技能 | `$env:USERPROFILE\.agents\skills\wiki-search\`、`wiki-write\` |
-| 管线 | `$env:USERPROFILE\.dsh\bin\llm-wiki-pipeline.mjs` |
-| 定时 | 计划任务 `LLM-Wiki Pipeline`（10:00 每日） |
-| 偏好蒸馏 | `$env:USERPROFILE\.dsh\bin\profile-distill.mjs` |
-| 周任务 | 计划任务 `Profile Distill`（周日 09:00） |
+| `--lint` | frontmatter / 双链 / 孤立 / stale / 断链（磁盘为准）/ 缺来源 |
+| `--okf` | 补 OKF v0.2 字段（幂等） |
+| `--index` | 重建导航与热投影 |
+| `--sync` | wiki H2 块 → mnemon（哈希增量 + 语义边） |
+| `--usage` | 回写召回热度 |
+| `--compile-patterns` | 孤立页聚类成 pattern（证据门槛 3） |
+| `--docs-sync` | mnemon Documents → wiki |
+| `--dsh-export` | DSH 会话 → `raw/sessions/dsh/` |
+| `--prune-memory` | 清理来源已消失的块 |
+| `--reconcile` | 邻域调和报告（只读，可开 LLM） |
+| `--rate <页> --rating useful\|outdated` | 质量反馈 |
+| `--all` / `--all --dry-run` | 全量 / 预览 |
 
-桌面版适配要点（0.8.0）：
-
-- **会话导出**：DSH 0.2.x 写作 `session.v4.jsonl.zstd`（版本号会变），管线按前缀匹配并用 `node:zlib` 逐帧解压，不再依赖 `zstd` 命令。
-- **记忆体同步**：Windows 上 `mnemon` 是 `.cmd`，直接用 `execFile` 会 ENOENT/EINVAL；管线会优先找 npm 全局包里的 `mnemon.exe`，找不到再退回 `shell: true`。
-- **embedding**：管线把 `MNEMON_EMBED_*` 注入 mnemon 子进程（endpoint/model/protocol/apiKey），key 依次读 `MNEMON_EMBED_API_KEY`、`EMBED_KEY`、`~/.dsh/.credentials.yaml` 的 `SF_API_KEY`、旧的 `~/.modlens/config.json`。
-- **检索**：SKILL 改用 DSH 的 `grep` 工具（自带 ripgrep），不要求 PATH 上有 `rg`。
-- **插件**：管线位置由 `$DSH_HOME` 推导；`session/disposed` 触发 `--all` 时会把 `LLM_WIKI_VAULT` 传给子进程。
-
-## 使用
-
-- **写入知识**：直接说"把这个记到知识库"，模型按 wiki-write 技能写入对应分类
-- **检索知识**：问"之前怎么做的"，模型按 wiki-search 技能检索并引用原文
-- **手动管线**：`node ~/bin/llm-wiki-pipeline.mjs --all`
-- **质量反馈**：`node ~/bin/llm-wiki-pipeline.mjs --rate wiki/决策/xxx.md --rating useful|outdated`
-
-### 管线路由
+## 检索路由
 
 ```bash
-node ~/bin/llm-wiki-pipeline.mjs --lint          # frontmatter 完整性 + 孤立节点检测 + stale 报告
-node ~/bin/llm-wiki-pipeline.mjs --okf           # OKF v0.2 字段补齐（幂等，verified 自动标记）
-node ~/bin/llm-wiki-pipeline.mjs --compile-patterns  # 从孤立节点聚类生成 pattern 页
-node ~/bin/llm-wiki-pipeline.mjs --index         # 重建导航页
-node ~/bin/llm-wiki-pipeline.mjs --sync          # 变更同步到 mnemon 记忆体
-node ~/bin/llm-wiki-pipeline.mjs --usage         # 回写召回热度到 frontmatter
-node ~/bin/llm-wiki-pipeline.mjs --dsh-export    # 导出 DSH 会话到 raw/sessions/dsh/
-node ~/bin/llm-wiki-pipeline.mjs --all           # 全量执行（含 --prune-memory）
-node ~/bin/llm-wiki-pipeline.mjs --all --dry-run # 预览模式（零写入）
-node ~/bin/profile-distill.mjs --since 7d        # 只读产 USER.md 候选
+node ~/.dsh/bin/wiki-router.mjs "上次怎么修 gnome 黑屏"   # 返回 route: wiki|session|live|docs|hot
+node ~/.dsh/bin/wiki-retrieval.mjs "关键词" --limit 5 --json
 ```
 
-### 偏好蒸馏（profile-distill.mjs）
+融合策略：BM25 + mnemon 向量 RRF（K=5，权重 1.0/0.5，标题加权 4）。调参用 `LLM_WIKI_RRF_K / _WB / _WM / TITLE_BOOST / CAT_WEIGHT`。
 
-- 从最近会话、记忆空间 `preference`、USER.md 只读生成候选：`reports/profile-candidate-<date>.md/json`；
-- 不写 USER.md；USER.md 是 mnemon 投影，只能经 `mnemon_runtime_memory` 写；
-- 新增可自动、修改/删除需确认；Windows 安装会注册周日 09:00 的 `Profile Distill` 计划任务；
-- `status: archived` 与 `recall: false` 的页面不参与同步。
+## 画像蒸馏
 
-## 配置（环境变量）
+```bash
+node ~/.dsh/bin/profile-extract.mjs --since 30d    # 3 角度抽取 + 行为事件
+node ~/.dsh/bin/profile-distill.mjs --since 30d    # 复核 → 候选 → USER.md diff
+```
+
+- **规则进 USER.md**（每轮注入，≤2KB 目标），**证据留画像页**（`profile_scope: evidence`）与记忆空间；
+- 抽取免费（Z.ai GLM-4-Flash 优先），复核固定 DeepSeek 官网 `deepseek-flash`；
+- 候选按「红线 3 / 沟通 2 / 工作 5 / 其他 2」配额，上限 12 条；
+- 应用只经 `mnemon_runtime_memory`，并回写画像页演变记录。
+
+## 自动化与健康
+
+- **同步分级**：`引用` 默认不入库；`发现` 只排除会话复盘/批量导入，排错/验证类纳入（`LLM_WIKI_SYNC_DISCOVERY=recap-only|all|off`）。
+- **编译触发**：会话日志 ≥300KB 时插件写提示标记，下一轮注入一次；`session-compile-candidates.mjs` 每周产出候选清单（只读）。
+- **保鲜**：`stale-review.mjs` 每周 Top20，按「质量低 + 最久未更新 + 被引用多」排序，附可执行 `--rate` 命令。
+- **健康**：`pipeline-health.mjs` 每日写 `reports/health/health-YYYY-MM.csv`，含 6 条召回探针；每月生成对比月报。
+
+## 配置
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| LLM_WIKI_VAULT | /mnt/d/DB/Obsidian/LLM-Wiki | vault 路径 |
-| LLM_WIKI_STATE | ~/.dsh/llm-wiki/pipeline-state.json | 管线增量状态文件 |
-| EMBED_KEY | 读 ~/.modlens/config.json | SiliconFlow API key |
-| EMBED_MODEL | BAAI/bge-m3 | 向量模型 |
-| LLM_WIKI_SYNC_EXCLUDE | 引用,发现 | 不参与 mnemon 同步的分类 |
-| LLM_WIKI_CHUNK_MIN | 40 | 小节最小字符数（中文短节也能入库） |
-| LLM_WIKI_CHUNK_MAX | 1200 | 单块最大字符数 |
-| LLM_WIKI_CHUNK_PER_PAGE | 12 | 每页最多块数 |
-| LLM_WIKI_CHUNK_BATCH | 40 | 每批导入块数 |
+| `LLM_WIKI_VAULT` | `/mnt/d/DB/Obsidian/LLM-Wiki` | vault 路径（Windows 默认 `D:\DB\Obsidian\LLM-Wiki`） |
+| `LLM_WIKI_STATE` | `~/.dsh/llm-wiki/pipeline-state.json` | 增量状态 |
+| `LLM_WIKI_SYNC_EXCLUDE` | `引用` | 不入库分类 |
+| `LLM_WIKI_SYNC_DISCOVERY` | `recap-only` | 发现类分级 |
+| `LLM_WIKI_CHUNK_MIN / MAX / PER_PAGE / BATCH` | `40 / 1200 / 24 / 40` | 切块参数 |
+| `MNEMON_EMBED_*` / `EMBED_KEY` / `EMBED_MODEL` | 读 `~/.dsh/.credentials.yaml` 的 SF key | 向量 |
+| `LLM_WIKI_LLM_MODELS` | `glm-4-flash-250414,glm-4.7-flash,THUDM/GLM-4-9B-0414` | 抽取链（免费） |
+| `LLM_WIKI_REVIEW_MODELS` | `deepseek-flash` | 复核链（官网） |
+| `LLM_WIKI_REVIEW_ENDPOINT` | `https://api.deepseek.com/v1` | 官网端点 |
+| `LLM_WIKI_REPORTS` | `D:\DB\DSH\reports` | 候选/清单/健康输出目录 |
+| `PROFILE_MAX_ADD` | `12` | 单批候选上限 |
+| `LLM_WIKI_COMPILE_HINT` | 开 | 设 `off` 关闭会话编译提示 |
+| `LLM_WIKI_RRF_K / _WB / _WM / TITLE_BOOST` | `5 / 1.0 / 0.5 / 4` | 融合检索调参 |
 
-## wiki 结构
+## 质量门槛
+
+| 指标 | 目标 |
+|---|---|
+| 断链 | 0 |
+| 同步覆盖（可入库页） | 100% |
+| 会话编译率 | ≥70% |
+| stale 处置 | 20 条/周 |
+| 画像候选精度 / gold 覆盖 | ≥75% / ≥75% |
+| 健康探针 hit@3 | 6/6 |
+
+## 排错
+
+- **Windows 上 mnemon 是 .cmd**：管线优先找 npm 全局包里的 `mnemon.exe`，找不到退回 `shell: true`。
+- **会话日志是 zstd 多帧**：用 `zlib.zstdDecompressSync` 逐帧解，不依赖 zstd 命令。
+- **LLM 429/1305**：免费模型高峰期限流，抽取链自动降级；复核固定官网模型不受影响。
+- **代理**：默认不走代理；需要时只在单条命令显式指定，不要写进 DSH 环境或 git 配置。
+- **mnemon 重建**：重跑 `--sync`；若整库重建，需重置远端同步分支。
+
+## 仓库结构
 
 ```
-LLM-Wiki/
-├── schema.md                # 运行时守则（插件注入到系统提示）
-├── log.md                   # 操作日志（管线追加）
-├── raw/                     # [Raw Layer] 原始素材（追加写入，永不删除）
-│   ├── sessions/dsh/        # DSH 会话导出（管线 --dsh-export 自动生成）
-│   └── zinbox-index/        # ZInBox 剪藏原始源
-├── wiki/                    # [Wiki Layer] 编译后的结构化知识
-│   ├── index.md             # 导航页（管线 --index 自动生成）
-│   ├── evolution/
-│   │   ├── logs.md          # 编译日志（pattern 创建/合并/归档事件）
-│   │   └── skill-impact.md  # 技能影响追踪表
-│   ├── patterns/            # WikiSkill 模式页（管线 --compile-patterns 自动生成）
-│   │   ├── TEMPLATE.md      # Pattern 页模板
-│   │   └── *-pattern.md     # 自动生成的可复用经验页
-│   └── <11 分类>/           # 发现/决策/概念/流程/命令/规则/提示/记忆/项目/引用/基因
-└── skills/                  # [Skills Layer] 可执行技能追溯（扩展点）
-    └── _template/PURPOSE.md # Skill 回溯到 inspire 它的 pattern 页
+dsh-llm-wiki/
+├─ plugin/dsh-llm-wiki.mjs        # 注入 + 生命周期 + 编译提示
+├─ scripts/
+│  ├─ llm-wiki-pipeline.mjs       # 维护管线
+│  ├─ wiki-retrieval.mjs          # 融合检索
+│  ├─ wiki-router.mjs             # 五路分流
+│  ├─ profile-extract.mjs         # 会话 → 证据
+│  ├─ profile-distill.mjs         # 证据 → 候选
+│  ├─ session-compile-candidates.mjs
+│  ├─ stale-review.mjs
+│  ├─ pipeline-health.mjs
+│  └─ embed-proxy.mjs
+├─ skills/wiki-write · skills/wiki-search
+├─ systemd/  install.sh  install.ps1
+├─ package.json（bundle 只含插件）
+└─ CHANGELOG.md
 ```
 
-### OKF v0.2 字段
+## 版本
 
-| 字段 | 类型 | 写入方 | 说明 |
-|---|---|---|---|
-| `sources` | `object[]`（每项 `resource` 必填） | 模型填写；管线 okfAlign 补全/规范化 | 知识来源（URL / session / 配置路径）；历史字符串数组会被 `--okf` 自动转成 `{ resource: ... }` |
-| `generated` | `{ by, at }` | 管线自动补充 | 生成者（`agent/dsh-llm-wiki` 或 `human:<id>`） |
-| `verified` | `{ by, at }` | quality_score≥4 自动标记 / --rate 确认 | 信任分级：agent verified / human reviewed |
-| `status` | `active\|draft\|archived` | 管线 stale 检测 + --rate 更新 | 生命周期状态 |
-| `stale_after` | ISO 日期 | 管线 okfAlign 自动计算 | created/updated + 90 天 |
-| `description` | `string` | 管线 okfAlign 从内容摘要推导 | 一句话知识描述 |
-| `quality_score` | 1-5 | 管线 usage 回写 + --rate 更新 | 知识质量评分 |
-
-> OKF 规范截至 2026-10-21 仍为 **v0.2**（SPEC.md 未更新）；0.8.0 起 `--okf` 会把历史 `sources` 字符串数组规范化为 `{ resource: ... }` 对象，幂等。
-
-### 信任分级
-
-| 级别 | 条件 | 置信度 |
-|---|---|---|
-| ✅ human-reviewed | `verified.by` 含 `human:` | 高置信，优先召回 |
-| ⚙️ machine-confirmed | `quality_score ≥ 4` 且无 human verified | 中置信，管线自动验证 |
-| ⚠️ unverified | 新页面或 `quality_score < 3` | 低置信，需人工确认 |
-
-## WikiSkill 三层架构对齐
-
-| WikiSkill 层 | dsh-llm-wiki 对应 | 说明 |
-|---|---|---|
-| **Raw Layer** | `raw/sessions/`, `raw/zinbox-index/` | 原始素材；管线 `--dsh-export` 自动导入 |
-| **Wiki Layer** | `wiki/`（12 分类 + patterns/ + evolution/） | 结构化知识；管线 `--lint/--okf/--compile-patterns` 自动维护 |
-| **Skills Layer** | `skills/` + DSH `~/.agents/skills/` | 可执行技能；每个 skill 可选配 `PURPOSE.md` 回溯 pattern |
-
-核心创新：**Pattern 层** — 从孤立节点聚类提取可复用经验，由管线 `--compile-patterns` 自动生成，写入 `wiki/evolution/logs.md` 编译日志。
-
-## 设计原则
-
-- **反脆弱**：检索/写入用 SKILL + DSH 原生工具（零插件故障面）；只有"必须进程内"的注入与事件钩子才进插件（~90 行）
-- **幂等**：管线 mtime 增量检测，重复运行无副作用；`--okf` / `--compile-patterns` 均幂等
-- **闭环**：使用数据（recall 命中）→ queried_count → quality_score → 影响召回 → verified 信任分级
-- **本地优先**：wiki 与记忆体全本地，向量可选云端
-- **编译进化**：孤立节点 → pattern 聚类 → 可复用经验，知识随使用不断提炼
+- `0.9.0`：检索路由 + 融合检索；画像 v3（证据管线/复核/预算）；编译候选、stale 复核、健康快照；发现分级同步；会话编译提示。
+- `0.8.0`：DSH 桌面版适配（zstd、mnemon.exe、embedding 注入、Windows 任务）。
 
 ## License
 

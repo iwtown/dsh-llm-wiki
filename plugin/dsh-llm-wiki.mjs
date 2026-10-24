@@ -20,7 +20,7 @@
  *  - 子进程用 process.execPath 启动；DSH Host 设置 ELECTRON_RUN_AS_NODE=1，因此 Electron
  *    exe 会以 Node 方式运行 .mjs。若将来该环境变量消失，可改为显式解析内置 node.exe。
  */
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, readdirSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -33,6 +33,10 @@ const DEFAULT_VAULT = process.platform === "win32"
   ? "D:\\DB\\Obsidian\\LLM-Wiki"
   : "/mnt/d/DB/Obsidian/LLM-Wiki";
 const PIPELINE = join(DSH_HOME, "bin", "llm-wiki-pipeline.mjs");
+const SESSIONS_ROOT = join(DSH_HOME, "sessions");
+const HINT_DIR = join(DSH_HOME, "llm-wiki");
+const HINT_FILE = join(HINT_DIR, "compile-hint.json");
+const HINT_STATE = join(HINT_DIR, "hint-state.json");
 const CACHE_TTL = 60_000; // 读文件缓存 60s
 
 function cached(file, ttl = CACHE_TTL) {
@@ -83,8 +87,8 @@ export function apply(ctx, config = {}) {
       if (!isMainAgent(context)) return "";
       const idx = readPreview();
       if (!idx) return "";
-      return "\n---\n# LLM-Wiki 知识库（管线自动维护）\n\n" + idx +
-        "\n\n**检索路由**：当天/精确/排错 → wiki-search（grep + read 原文）；跨天/联想/找经验 → mnemon_recall；项目档案 → mnemon_document_search。\n---\n";
+      return "\n---\n# LLM-Wiki 知识库（管线自动维护）\n\n" + idx + takeCompileHint() +
+        "\n\n**检索入口**：先跑 wiki-router.mjs 分流 → wiki 走 wiki-retrieval 融合检索 / session 走会话语义 / live 直接实测 / docs 走 Documents / hot 看热记忆。\n---\n";
     },
   }), "dsh-llm-wiki.prompt.preview");
 
@@ -104,6 +108,41 @@ export function apply(ctx, config = {}) {
   let lastRun = 0;
   let running = false;
   const COOLDOWN_MS = 60_000;
+
+  const markCompileHint = (session) => {
+    try {
+      if (process.env.LLM_WIKI_COMPILE_HINT === "off") return;
+      const h = (session && (session.header || session.meta || session)) || {};
+      const id = h.id || h.sessionId || (session && session.id);
+      if (!id) return;
+      let logSize = 0;
+      for (const rootDir of [SESSIONS_ROOT]) {
+        if (!existsSync(rootDir)) continue;
+        for (const proj of readdirSync(rootDir)) {
+          const dir = join(rootDir, proj, "session-" + id);
+          const f = join(dir, "session.v4.jsonl.zstd");
+          try { if (existsSync(f)) { logSize = statSync(f).size; break; } } catch {}
+        }
+      }
+      if (logSize < 300 * 1024) return; // 小于 ~300KB 视为短会话，不提示
+      mkdirSync(HINT_DIR, { recursive: true });
+      writeFileSync(HINT_FILE, JSON.stringify({ sessionId: id, sizeKB: Math.round(logSize / 1024), at: Date.now() }), "utf8");
+    } catch {}
+  };
+  const takeCompileHint = () => {
+    try {
+      if (!existsSync(HINT_FILE)) return "";
+      const h = JSON.parse(readFileSync(HINT_FILE, "utf8") || "{}");
+      if (!h || !h.at || Date.now() - h.at > 48 * 3600 * 1000) { try { unlinkSync(HINT_FILE); } catch {} return ""; }
+      let st = {};
+      try { st = JSON.parse(readFileSync(HINT_STATE, "utf8") || "{}"); } catch {}
+      if (st.lastShown && st.lastShown >= h.at) return "";
+      mkdirSync(HINT_DIR, { recursive: true });
+      writeFileSync(HINT_STATE, JSON.stringify({ lastShown: h.at }), "utf8");
+      try { unlinkSync(HINT_FILE); } catch {}
+      return "\n> 上个会话较大（约 " + h.sizeKB + "KB），可能有可编译内容：运行 session-compile-candidates.mjs 生成候选，再用 wiki-write 落页（只写决策/排错/可复用结论）。";
+    } catch { return ""; }
+  };
 
   const runPipeline = () => {
     if (running) return;
@@ -142,6 +181,6 @@ export function apply(ctx, config = {}) {
   };
   ctx.on("session/disposed", (session) => {
     if (isSubSession(session)) return;
-    try { runPipeline(); } catch (e) { try { console.log("[dsh-llm-wiki] hook error: " + e.message); } catch {} }
+    try { markCompileHint(session); runPipeline(); } catch (e) { try { console.log("[dsh-llm-wiki] hook error: " + e.message); } catch {} }
   });
 }

@@ -24,14 +24,22 @@ description: 在 LLM-Wiki 知识库（D:\\DB\\Obsidian\\LLM-Wiki）中检索知�
 
 ## 默认流程
 
-1. **导航优先**：先读 `wiki/index.md`（管线生成的导航页，含分类计数与最近更新）；已知分类时直接看该分类目录，比全文搜索快。
-2. **关键词搜索**：用 DSH 的 `grep` 工具（自带 ripgrep，**不依赖 PATH 上的 rg**）：
+0. **先分流（新增，别跳）**：`node "$env:USERPROFILE\.dsh\bin\wiki-router.mjs" "<问题>"`
+   - 输出 `wiki / session / live / docs / hot` 五类之一 + 置信度 + 下一步命令。session 路由的 `--exec` 返回 `sid + summary + score + why`，可直接判断"是不是这次会话"。**只有 wiki 路由才继续下面的检索流程**；`session` 走 `node "$env:USERPROFILE\.dsh\bin\wiki-router.mjs" "<问题>" --exec`（内含 embedding 语义会话检索，命中@3 约 70%），`live` 直接实测，`docs` 走 Documents，`hot` 看热记忆。
+   - **级联规则**：wiki 检索返回的 top1 如果与问题明显不相干（或全部 < 相关阈值），不要再硬查 wiki，改用会话语义检索——真实的"上次怎么弄的"问题常常口语化到没有知识关键词。
+   - 判据：出现「上次/装过/没拉起/报错/怎么办/安装/URL」→ session；「现在/是否/端口/进程/检查一下」→ live；「什么/区别/原理/怎么设计/哪些组件」→ wiki。
+1. **融合检索（首选）**：`node "$env:USERPROFILE\.dsh\bin\wiki-retrieval.mjs" "<问题>" --limit 5`
+   - BM25（全库）+ `mnemon recall` → RRF 融合 → 质量/新鲜度/stale 重排；输出「摘要 + 路径 + 双路排名」，据路径精读。
+   - `--json` 取机器可读；`--no-mnemon` 只跑 BM25；`--limit N` 调条数。评测：命中@3 ≈73%（多次 70–80%；BM25 63% / recall 43–47%）。
+   - **仅用于知识型提问**；"本机怎么装/怎么修/上次做到哪"这类运维问题应走会话历史与热记忆，别用本脚本硬查。
+2. **导航优先**：先读 `wiki/index.md`（管线生成的导航页，含分类计数、热投影与最近更新）；已知分类时直接看该分类目录，比全文搜索快。
+3. **关键词搜索**：用 DSH 的 `grep` 工具（自带 ripgrep，**不依赖 PATH 上的 rg**）：
    - `grep({ pattern: "关键词", path: "D:\\DB\\Obsidian\\LLM-Wiki\\wiki", include: "*.md" })`
    - 中文关键词直接搜；多主题用 `A|B`；需要排除 `_archived` / `trash` 时缩小 `path` 到具体分类目录。
    - 命令行等价物（本机装了 ripgrep 时）：`rg -l "关键词" wiki/ --glob "*.md"`。
-3. **精读原文**：命中后 `read` 目标文件。**先读 frontmatter 预判**（前 20 行）：`type`、`description`、`related`、`stale_after`/`status`——不相关或已过时（当前日期 > stale_after 或 status: stale）直接跳过，相关再全文精读。
-4. **行级定位**：grep 结果已带行号；需要上下文时用 `read` 的 `offset` 精读该段。
-5. **引用**：回答时给出 wiki 页面相对路径（如 `wiki/决策/子代理模型选型与分配.md`）；溯源优先用 frontmatter 的 `sources` 字段（OKF v0.2：对象数组，每项含 `resource`），缺失时回退正文原始链接。
+4. **精读原文**：命中后 `read` 目标文件。**先读 frontmatter 预判**（前 20 行）：`type`、`description`、`related`、`stale_after`/`status`——不相关或已过时（当前日期 > stale_after 或 status: stale）直接跳过，相关再全文精读。
+5. **行级定位**：grep 结果已带行号；需要上下文时用 `read` 的 `offset` 精读该段。
+6. **引用**：回答时给出 wiki 页面相对路径（如 `wiki/决策/子代理模型选型与分配.md`）；溯源优先用 frontmatter 的 `sources` 字段（OKF v0.2：对象数组，每项含 `resource`），缺失时回退正文原始链接。
 
 ## 失败处理
 

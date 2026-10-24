@@ -2,5 +2,5 @@ url: https://github.com/iwtown/dsh-llm-wiki
 name: iwtown/dsh-llm-wiki
 category: memory
 description:
-  en: 'Karpathy LLM Wiki pattern knowledge base for DSH: wiki-write/wiki-search skills, zero-dependency pipeline (lint/index/mnemon memory sync/quality feedback), minimal lifecycle plugin injecting schema + knowledge preview, SiliconFlow semantic recall via an Ollama-compatible proxy.'
-  zh: 'Karpathy LLM Wiki 模式的 DSH 知识库系统：wiki-write/wiki-search 技能引导模型写读 Obsidian wiki，零依赖管线（lint/索引/mnemon 记忆体同步/质量闭环），极简生命周期插件注入守则与知识预览，Ollama 兼容代理接 SiliconFlow 语义召回。'
+  en: 'Karpathy LLM Wiki pattern knowledge base for DSH: wiki-write/wiki-search skills, zero-dependency maintenance pipeline (lint/index/OKF/mnemon sync/quality feedback/patterns), retrieval routing + fused BM25+vector search, knowledge compilation triggers, stale review loop, health snapshots, and a read-only preference distiller (USER.md).'
+  zh: 'Karpathy LLM Wiki 模式的 DSH 知识库系统：写读技能 + 零依赖维护管线（lint/索引/OKF/mnemon 同步/质量闭环/模式聚类）+ 检索路由与 BM25·向量融合检索 + 会话编译候选 + stale 保鲜复核 + 健康快照 + 只读偏好蒸馏（USER.md）。'

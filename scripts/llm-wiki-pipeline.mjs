@@ -34,8 +34,10 @@ const STALE_DAYS = 90;
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 const DRY = args.has("--dry-run");
-const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory", "--dsh-export", "--docs-sync"].includes(a));
+const doAll = ![...args].some(a => ["--lint", "--index", "--sync", "--rate", "--usage", "--okf", "--prune-memory", "--dsh-export", "--docs-sync", "--reconcile", "--compile-patterns"].includes(a));
 const RUN = { lint: doAll || args.has("--lint"), index: doAll || args.has("--index"), sync: doAll || args.has("--sync"), usage: doAll || args.has("--usage"), okf: doAll || args.has("--okf"), compilePatterns: doAll || args.has("--compile-patterns"), prune: doAll || args.has("--prune-memory"), dsh: doAll || args.has("--dsh-export"), docs: doAll || args.has("--docs-sync") };
+const RECONCILE_TARGET = rawArgs[rawArgs.indexOf("--reconcile") + 1];
+const DO_RECONCILE = args.has("--reconcile") && RECONCILE_TARGET;
 const RATE_TARGET = rawArgs[rawArgs.indexOf("--rate") + 1];
 const RATE_VALUE = rawArgs[rawArgs.indexOf("--rating") + 1];
 const DO_RATE = args.has("--rate") && RATE_TARGET && RATE_VALUE;
@@ -255,7 +257,111 @@ function okfAlign(pages) {
 
 
 // --compile-patterns: 扫描孤立节点，聚类高频主题，生成 wiki/patterns/ 页面
+// ── 通用 LLM 调用（OpenAI 兼容；默认 SiliconFlow，免费/低价小模型）──
+async function callLLM(prompt, maxTokens = 700) {
+  const endpoint = (process.env.LLM_WIKI_LLM_ENDPOINT || "https://api.siliconflow.cn/v1").replace(/\/$/, "");
+  const model = process.env.LLM_WIKI_LLM_MODEL || "Qwen/Qwen3.5-4B";
+  const key = readEmbedKey();
+  if (!key) throw new Error("no LLM api key");
+  const res = await fetch(endpoint + "/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer " + key },
+    body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: maxTokens, ...(process.env.LLM_WIKI_LLM_THINKING === "1" ? {} : { enable_thinking: false }) }),
+    signal: AbortSignal.timeout(90000),
+  });
+  if (!res.ok) throw new Error("LLM HTTP " + res.status + " " + String(await res.text()).slice(0, 120));
+  const j = await res.json();
+  return String(j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message.content || "" : "");
+}
+
+function buildReconcilePrompt(page, neighbors) {
+  const bodyOf = p => stripFrontmatter(p.content).replace(/\s+/g, " ").trim().slice(0, 220);
+  const head = "你是知识库维护者。用户刚写入/改写了页面 A，请判断 A 与每个邻居页 B 的关系。\n" +
+    "只输出 JSON 数组，不要任何解释，元素形如 {\"page\":\"B的相对路径\",\"action\":\"ADOPT|EXTEND|SUPERSEDE|IGNORE\",\"reason\":\"不超过40字\"}。\n" +
+    "定义：ADOPT=不冲突、不改；EXTEND=需要在 B 补充新结论；SUPERSEDE=A 的新结论推翻 B 的旧结论；IGNORE=B 已归档或已被取代。\n" +
+    "只按内容判断，不要因风格差异要求改写。\n\n" +
+    "A: " + page.rel.replace(/\\/g, "/") + " | " + String(page.fm.description || "").slice(0, 80) + " | " + bodyOf(page) + "\n";
+  const parts = neighbors.slice(0, 6).map((p, i) => "B" + (i + 1) + ": " + p.rel.replace(/\\/g, "/") + " | " + String(p.fm.description || "").slice(0, 60) + " | " + bodyOf(p));
+  return head + parts.join("\n");
+}
+
+function parseVerdicts(text) {
+  const i = text.indexOf("["); const j = text.lastIndexOf("]");
+  if (i < 0 || j <= i) return [];
+  try { const arr = JSON.parse(text.slice(i, j + 1)); return Array.isArray(arr) ? arr : []; } catch { return []; }
+}
+
+// P0-1 邻域调和：只报告、不改文；--write 需 LLM_WIKI_RECONCILE_WRITE=1
+async function reconcilePage(pages, target) {
+  const nrm = s => String(s || "").replace(/\\/g, "/").replace(/^wiki\//i, "").replace(/\.md$/i, "");
+  const t = nrm(target);
+  const page = pages.find(p => nrm(p.rel) === t || nrm(p.file) === t || nrm(p.rel).split("/").pop() === t);
+  if (!page) return { error: "page not found: " + target };
+  const byName = new Map(pages.map(p => [nrm(p.file), p]));
+  const outbound = relatedTargets(page.content).map(nrm);
+  const inbound = pages.filter(p => p !== page && (p.content.match(/\[\[[^\]]+\]\]/g) || []).some(l => {
+    const inner = l.slice(2, -2).split("|")[0].trim();
+    return nrm(inner) === nrm(page.file) || nrm(inner).split("/").pop() === nrm(page.file);
+  }));
+  const seen = new Set();
+  const neighbors = [];
+  for (const cand of [...outbound, ...inbound.map(p => nrm(p.file))]) {
+    if (neighbors.length >= 12) break;
+    const np = byName.get(nrm(cand.split("/").pop()));
+    if (!np || np === page || seen.has(np.rel)) continue;
+    seen.add(np.rel);
+    neighbors.push(np);
+  }
+  const now = Date.now();
+  const verdicts = neighbors.map(np => {
+    const body = stripFrontmatter(np.content);
+    const upd = np.fm.updated || np.fm.created;
+    const days = upd ? Math.round((now - new Date(upd).getTime()) / 864e5) : null;
+    const signals = [];
+    if (np.fm.superseded_by) signals.push("already_superseded");
+    if (days !== null && days > 180) signals.push("stale_" + days + "d");
+    if (/改为|废弃|不再|停止使用|替代|superseded/.test(body)) signals.push("revision_language");
+    const fresh = days !== null && days <= 7;
+    const action = np.fm.superseded_by ? "IGNORE"
+      : (!fresh && days !== null && days > 180)
+        ? (signals.includes("revision_language") ? "SUPERSEDE_CANDIDATE" : "EXTEND_CANDIDATE")
+        : (!fresh && (np.fm.status === "stale" || Number(np.fm.quality_score) <= 2)) ? "EXTEND_CANDIDATE" : "ADOPT";
+    return { page: np.rel, action, days_since_update: days, quality: np.fm.quality_score ?? null, description: String(np.fm.description || "").slice(0, 100), signals };
+  });
+  let llmUsed = false, llmError;
+  if (process.env.LLM_WIKI_RECONCILE_LLM === "1" && verdicts.length) {
+    try {
+      const out = await callLLM(buildReconcilePrompt(page, neighbors), 700);
+      const parsed = parseVerdicts(out);
+      for (const v of parsed) {
+        const target0 = verdicts.find(x => x.page.replace(/\\/g, "/") === String(v.page || "").replace(/\\/g, "/") || x.page.replace(/\\/g, "/").endsWith("/" + String(v.page || "").replace(/^wiki\//, "")));
+        if (target0 && ["ADOPT", "EXTEND", "SUPERSEDE", "IGNORE"].includes(v.action)) {
+          target0.action = v.action;
+          target0.source = "llm";
+          target0.reason = String(v.reason || "").slice(0, 120);
+        }
+      }
+      llmUsed = true;
+    } catch (e) { llmError = String(e.message || e).slice(0, 140); }
+  }
+  const writes = [];
+  if (process.env.LLM_WIKI_RECONCILE_WRITE === "1") {
+    for (const v of verdicts) {
+      if (v.action !== "SUPERSEDE_CANDIDATE" && v.action !== "SUPERSEDE") continue;
+      const np = pages.find(p => p.rel === v.page);
+      if (!np || np.fm.superseded_by) continue;
+      const updated = setFmField(np.content, "superseded_by", JSON.stringify("[[" + nrm(page.file) + "]]"));
+      writeFileSync(join(VAULT, np.rel), updated);
+      writes.push(v.page);
+    }
+  }
+  return { page: page.rel, mode: process.env.LLM_WIKI_RECONCILE_WRITE === "1" ? "report+write" : "report-only", llm: llmUsed, llmError, neighbors: verdicts, written: writes, note: "确定性候选 + 可选 LLM 裁定；来源字段 llm 表示模型判断" };
+}
+
 function compilePatterns(pages) {
+  // M4 证据门槛：同一模式至少 3 处独立出现才晋升为 pattern
+  const MIN_OCC = Number(process.env.LLM_WIKI_PATTERN_MIN || 3);
+  const relOf = p => p.rel.replace(/\\/g, "/").replace(/^wiki\//, "").replace(/\.md$/, "");
   const patternsDir = join(WIKI, "patterns");
   const evolutionDir = join(WIKI, "evolution");
   const logsFile = join(evolutionDir, "logs.md");
@@ -278,7 +384,7 @@ function compilePatterns(pages) {
   const today = new Date().toISOString().slice(0, 10);
   const logEntries = [];
   for (const [typ, ps] of Object.entries(byType)) {
-    if (ps.length < 2) continue;
+    if (ps.length < MIN_OCC) continue;
     const keywords = new Map();
     for (const pg of ps) {
       const title = pg.fm.title || pg.rel;
@@ -291,18 +397,21 @@ function compilePatterns(pages) {
     const patternFile = join(patternsDir, patternName + ".md");
     if (existsSync(patternFile)) {
       let existing = readFileSync(patternFile, "utf8");
-      const appendLine = ps.map(pp => "- [[" + pp.rel + "]]（" + (pp.fm.created || today) + "）").join("\n");
+      const appendLine = ps.map(pp => "- [[" + relOf(pp) + "]]（" + (pp.fm.created || today) + "）").join("\n");
       const insertAfter = existing.indexOf("## 出现记录\n");
       if (insertAfter >= 0) {
         const insertAt = existing.indexOf("\n", insertAfter) + 1;
         existing = existing.slice(0, insertAt) + appendLine + "\n" + existing.slice(insertAt);
       }
       existing = existing.replace(/^updated: .+$/m, "updated: " + today);
+      const occ = (existing.match(/^- \[\[/gm) || []).length;
+      if (/^pattern_occurrences:/m.test(existing)) existing = existing.replace(/^pattern_occurrences: .+$/m, "pattern_occurrences: " + occ);
+      else existing = existing.replace(/^status: active$/m, "status: active\npattern_occurrences: " + occ + "\npattern_refuted_by: []");
       writeFileSync(patternFile, existing);
       logEntries.push("* **Pattern 更新**: [[wiki/patterns/" + patternName + "]] \u2014 追加 " + ps.length + " 条新证据");
     } else {
-      const rl = ps.slice(0, 3).map(pp => "  - \"[[" + pp.rel + "]]\"").join("\n");
-      const ar = ps.map(pp => "- [[" + pp.rel + "]]（" + (pp.fm.created || today) + "）").join("\n");
+      const rl = ps.slice(0, 3).map(pp => "  - \"[[" + relOf(pp) + "]]\"").join("\n");
+      const ar = ps.map(pp => "- [[" + relOf(pp) + "]]（" + (pp.fm.created || today) + "）").join("\n");
       const parts = [
         "---",
         'title: "' + topKeywords[0] + ' 模式"',
@@ -314,6 +423,10 @@ function compilePatterns(pages) {
         "related:",
         rl,
         "cssclasses: [pattern]",
+        "pattern_occurrences: " + ps.length,
+        "pattern_evidence:",
+        ...ps.slice(0, 6).map(pp => "  - \"[[" + relOf(pp) + "]]\""),
+        "pattern_refuted_by: []",
         "---",
         "",
         "# " + topKeywords[0] + " 模式",
@@ -564,7 +677,7 @@ function collectPages() {
       } catch {}
     }
   }
-  for (const cat of ["决策","发现","概念","项目","流程","命令","规则","提示","记忆","基因","引用"]) {
+  for (const cat of ["决策","发现","概念","项目","流程","命令","规则","提示","记忆","基因","引用","patterns"]) {
     const dir = join(WIKI, cat);
     if (existsSync(dir) && statSync(dir).isDirectory()) walk(dir, cat);
   }
@@ -574,6 +687,13 @@ function collectPages() {
 function lint(pages) {
   const issues = [];
   const links = new Map();
+  // 代码块/行内代码里的 [[ 不是链接（如"正文 `[[` 为 0"），先剥离再统计
+  const stripCode = s => String(s).replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+  const pageNames = new Set(pages.map(p => p.file.replace(/\.md$/i, "")));
+  // 断链判定要以磁盘为准：index.md、索引/、raw、归档目录不在 pages 里，但文件真实存在
+  const diskNames = new Set();
+  try { for (const f of readdirSync(VAULT, { recursive: true })) { const b = String(f).split(/[\\/]/).pop(); if (b) diskNames.add(b); } } catch {}
+  const archivedRels = new Set(pages.filter(p => p.fm.status === "archived").map(p => p.rel));
   for (const p of pages) {
     const archived = p.fm.status === "archived";
     if (!archived) {
@@ -587,14 +707,37 @@ function lint(pages) {
       for (const f of ["title", "type", "created"]) {
         if (!p.fm[f]) issues.push({ type: "missing_frontmatter", path: p.rel, message: "缺 " + f });
       }
-      const wl = (p.content.match(/\[\[[^\]]+\]\]/g) || []).length;
+      const wl = (stripCode(p.content).match(/\[\[[^\]]+\]\]/g) || []).length;
       if (wl < 2) issues.push({ type: "few_wikilinks", path: p.rel, message: "wikilink " + wl });
+      // P0-2 语义检查：superseded_by 目标存在性 / 含命令页缺溯源
+      if (p.fm.superseded_by) {
+        const tgt = String(p.fm.superseded_by).replace(/[\[\]]/g, "").replace(/^wiki\//i, "").split("|")[0].split("#")[0].trim();
+        const nm = tgt.split("/").pop();
+        if (nm && !pageNames.has(nm)) issues.push({ type: "superseded_target_missing", path: p.rel, message: "superseded_by 指不到页面: " + tgt });
+      }
+      const hasCmdBlock = /```(?:bash|sh|powershell|pwsh|cmd)?\n[\s\S]{10,}?```/.test(content);
+      const fmObj = extractFmText(content);
+      const fmStr = fmObj && fmObj.fm ? fmObj.fm : "";
+      if (hasCmdBlock && !/^sources?:/m.test(fmStr)) issues.push({ type: "missing_sources", path: p.rel, message: "含命令块但无 sources" });
     }
-    for (const m of p.content.matchAll(/\[\[([^\]#|]+)/g)) {
+    for (const m of stripCode(p.content).matchAll(/\[\[([^\]#|]+)/g)) {
       const t = m[1].trim();
       if (!links.has(t)) links.set(t, new Set());
       links.get(t).add(p.rel);
     }
+  }
+  // P0-2 语义检查：有提无页（指向不存在页面的 wikilink）
+  let missingPage = 0;
+  for (const [t, srcs] of links.entries()) {
+    if (missingPage >= 60) break;
+    if (/^(raw|https?)\b/i.test(t)) continue;
+    const nm = t.replace(/\\/g, "/").replace(/^wiki\//i, "").replace(/\.md$/i, "").split("/").pop();
+    if (!nm || nm.length < 2 || pageNames.has(nm)) continue;
+    if (diskNames.has(nm) || diskNames.has(nm + ".md")) continue;
+    const realSrcs = [...srcs].filter(s => !archivedRels.has(s));
+    if (!realSrcs.length) continue;
+    issues.push({ type: "missing_page", path: realSrcs[0], message: "[[" + t + "]] 无对应页 (" + realSrcs.length + " 处引用)" });
+    missingPage++;
   }
   const graceCut = new Date(); graceCut.setDate(graceCut.getDate() - 7);
   const orphans = pages.filter(p => {
@@ -620,7 +763,15 @@ function rebuildIndex(pages) {
   const cats = ["决策","发现","概念","项目","流程","命令","规则","提示","记忆","基因","引用"].filter(c => byCat[c]);
   let md = "# LLM-Wiki 知识库导航\n\nAgent 自主浏览入口。通过以下分类逐级浏览。\n\n> 此页面由管线自动维护。\n\n## 分类\n\n";
   for (const c of cats) md += "* [wiki/" + c + "](wiki/" + c + "/index.md) — " + byCat[c] + " 条\n";
-  const recent = [...pages].sort((a, b) => b.mtime - a.mtime).slice(0, 10);
+  // P1-2 热投影：≤6 行 / ≤320 字，随 index.md 在会话启动时注入
+  const hotRecent = [...pages].sort((a, b) => b.mtime - a.mtime).slice(0, 3);
+  const hotQuery = [...pages].filter(p => Number(p.fm.queried_count) > 0)
+    .sort((a, b) => Number(b.fm.queried_count) - Number(a.fm.queried_count)).slice(0, 3);
+  const short = p => "[[" + p.rel.replace(/\\/g, "/").replace(/^wiki\//, "").replace(/\.md$/, "") + "]]";
+  let hotMd = "## 热投影（最近变更 / 高命中）\n\n- 最近：" + hotRecent.map(short).join(" · ") + "\n";
+  if (hotQuery.length) hotMd += "- 高命中：" + hotQuery.map(p => short(p) + "(" + p.fm.queried_count + ")").join(" · ") + "\n";
+  md += "\n" + hotMd.slice(0, 320) + "\n";
+  const recent = [...pages].sort((a, b) => b.mtime - a.mtime).slice(0, 5);
   md += "\n## 最近更新\n\n";
   for (const p of recent) md += "* [" + (p.fm.title || p.file) + "](" + p.rel + ") — " + new Date(p.mtime).toISOString().slice(0, 10) + "\n";
   return md;
@@ -635,10 +786,32 @@ const MNEMON_CATEGORY = { 决策: "decision", 规则: "decision", 发现: "insig
 const MNEMON_IMPORTANCE = { 规则: 5, 决策: 4, 项目: 3, 发现: 3, 概念: 3, 流程: 3, 命令: 3, 提示: 2, 记忆: 2, 引用: 2, 基因: 3 };
 // ── H2 切块：每个小节 = 一条可独立召回的原子记忆 ──
 // 配置（env）：LLM_WIKI_SYNC_EXCLUDE / CHUNK_MIN / CHUNK_MAX / CHUNK_PER_PAGE / CHUNK_BATCH
-const SYNC_EXCLUDE = new Set((process.env.LLM_WIKI_SYNC_EXCLUDE || "引用,发现").split(",").map(s => s.trim()).filter(Boolean));
+const SYNC_EXCLUDE = new Set((process.env.LLM_WIKI_SYNC_EXCLUDE || "引用").split(",").map(s => s.trim()).filter(Boolean));
+// 发现类分级：recap-only（默认，排除复盘流水）/ all / off
+const SYNC_DISCOVERY = process.env.LLM_WIKI_SYNC_DISCOVERY || "recap-only";
+function isRecapDump(p) {
+  const meta = String(p.fm.title || "") + " " + String(p.fm.description || "");
+  if (/会话复盘|批量导入/.test(meta)) return true;
+  const head = String(p.content).slice(0, 2500);
+  return /批量导入 — 来自|自动编译自 \[\[raw\/sessions/.test(head);
+}
+function shouldSyncPage(p) {
+  if (p.fm.status === "archived") return false;
+  if (String(p.fm.recall).toLowerCase() === "false") return false;
+  if (p.cat === "发现") {
+    if (SYNC_DISCOVERY === "off") return false;
+    if (SYNC_DISCOVERY === "recap-only") {
+      if (isRecapDump(p)) return false;
+      if (Number(p.fm.quality_score || 3) < 2) return false;
+      return true;
+    }
+    return SYNC_DISCOVERY === "all";
+  }
+  return !SYNC_EXCLUDE.has(p.cat);
+}
 const CHUNK_MIN = Number(process.env.LLM_WIKI_CHUNK_MIN || 40);
 const CHUNK_MAX = Number(process.env.LLM_WIKI_CHUNK_MAX || 1200);
-const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 12);
+const CHUNK_PER_PAGE = Number(process.env.LLM_WIKI_CHUNK_PER_PAGE || 24);
 const CHUNK_BATCH = Number(process.env.LLM_WIKI_CHUNK_BATCH || 40);
 const SKIP_SECTION = /^(相关|参考|来源|关联|链接|参见|变更|更新|日志|经验|复盘|附录|目录|导航|索引|版本|license)/i;
 /** 去掉标题里的 emoji/标点，用于跳过规则匹配（原标题仍用于内容前缀）。 */
@@ -687,21 +860,32 @@ function splitLong(text, max) {
 function chunkPage(p) {
   if (p.fm.status === "archived") return [];
   if (String(p.fm.recall).toLowerCase() === "false") return [];
+  const superseded = Boolean(p.fm.superseded_by);
   const title = p.fm.title || p.file.replace(/\.md$/, "");
   const qs = Number(p.fm.quality_score);
   const base = MNEMON_IMPORTANCE[p.cat] ?? 3;
-  const importance = qs >= 4 ? Math.max(base, 4) : qs <= 2 ? Math.min(base, 2) : Math.min(Math.max(base, 3), 4);
+  let importance = qs >= 4 ? Math.max(base, 4) : qs <= 2 ? Math.min(base, 2) : Math.min(Math.max(base, 3), 4);
+  if (superseded) importance = Math.min(importance, 2);
   const entities = [p.fm.project].filter(v => v && v !== "-");
-  const tags = ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : [])].filter(Boolean);
+  const tags = ["llm-wiki", p.cat, ...(p.fm.project ? [p.fm.project] : []), ...(superseded ? ["superseded"] : [])].filter(Boolean);
   const body = stripFrontmatter(p.content);
-  const sections = [];
-  let cur = { heading: "", lines: [] };
-  for (const line of body.split("\n")) {
-    const m = /^##\s+(.+?)\s*$/.exec(line);
-    if (m) { sections.push(cur); cur = { heading: m[1], lines: [] }; }
-    else cur.lines.push(line);
+  const splitBy = (re) => {
+    const out = [];
+    let cur = { heading: "", lines: [] };
+    for (const line of body.split("\n")) {
+      const m = re.exec(line);
+      if (m) { out.push(cur); cur = { heading: m[1], lines: [] }; }
+      else cur.lines.push(line);
+    }
+    out.push(cur);
+    return out;
+  };
+  let sections = splitBy(/^##\s+(.+?)\s*$/);
+  // P0-4：没有 H2 小节时退到 H3（批量导入/旧模板常用 ### 起节），再退整页
+  if (sections.length <= 1) {
+    const h3 = splitBy(/^###\s+(.+?)\s*$/);
+    if (h3.length > 1) sections = h3;
   }
-  sections.push(cur);
   const chunks = [];
   for (const sec of sections) {
     if (chunks.length >= CHUNK_PER_PAGE) break;
@@ -786,7 +970,7 @@ async function ollamaAlive() {
   }).catch(() => false);
 }
 async function syncMemory(pages) {
-  const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && p.fm.status !== "archived" && String(p.fm.recall).toLowerCase() !== "false");
+  const syncPages = pages.filter(shouldSyncPage);
   const state = loadState();
   const plan = [];
   const forgetIds = [];
@@ -869,7 +1053,10 @@ async function syncMemory(pages) {
       if (id) nextPages[rel].chunks.push({ h: c.hash, id });
     }
   }
-  saveState(nextPages);
+  // 只覆盖页面条目，保留 exportedDsh / docsImported 等元数据（否则每次 --sync 都会把它们清空，导致重复导出）
+  const preserved = {};
+  for (const k of ["exportedDsh", "docsImported"]) if (state[k]) preserved[k] = state[k];
+  saveState({ ...nextPages, ...preserved });
   const result = { synced: imported.length, chunks: plan.length, forgotten, pages: syncPages.length, ...(error ? { error } : {}) };
   // 对账：按当前块哈希清掉历史遗留的 import 孤儿条目（状态里没记录到 id 的旧块）
   if (!error && process.env.LLM_WIKI_RECONCILE !== "off") {
@@ -897,6 +1084,7 @@ async function syncMemory(pages) {
   if (!error && process.env.LLM_WIKI_LINKS !== "off") {
     try {
       const norm = (s) => String(s).replace(/\\/g, "/");
+      const supersededRels = new Set(syncPages.filter(p => p.fm.superseded_by).map(p => norm(p.rel)));
       const pageIdByRel = new Map();
       for (const [rel, v] of Object.entries(nextPages)) {
         const first = v.chunks.find(c => c.id);
@@ -920,7 +1108,8 @@ async function syncMemory(pages) {
           if (seen.has(pair)) continue;
           seen.add(pair);
           try {
-            await execFileAsync(cli.command, ["link", srcId, tgtId, "--type", "semantic", "--weight", "0.6", "--meta", JSON.stringify({ reason: "wiki related" })], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) });
+            const w = supersededRels.has(srcRel) ? "0.2" : "0.6";
+            await execFileAsync(cli.command, ["link", srcId, tgtId, "--type", "semantic", "--weight", w, "--meta", JSON.stringify({ reason: w === "0.2" ? "wiki related (superseded)" : "wiki related" })], { timeout: 30000, env, ...(cli.shell ? { shell: true } : {}) });
             linked++;
           } catch {}
           if (linked >= 120) break;
@@ -952,12 +1141,24 @@ async function main() {
   }
   const pages = collectPages();
   console.log("页面数:", pages.length);
+  if (DO_RECONCILE) {
+    const r = await reconcilePage(pages, RECONCILE_TARGET);
+    console.log("\n== reconcile ==");
+    console.log(JSON.stringify(r, null, 1));
+    if (!DRY && !r.error) appendLog("reconcile:" + r.page + " 邻居" + (r.neighbors || []).length);
+    return;
+  }
   const summary = [];
   if (RUN.lint) {
     const r = lint(pages);
     console.log("\n== lint ==");
     console.log("问题:", r.issues.length, "| 孤立节点:", r.orphans.length, "| stale:", r.stale.length);
-    for (const i of r.issues.slice(0, 8)) console.log("  [问题]", i.path, i.message);
+    const byType = {};
+    for (const i of r.issues) byType[i.type] = (byType[i.type] || 0) + 1;
+    console.log("按类型:", JSON.stringify(byType));
+    const wantType = process.env.LLM_WIKI_LINT_TYPE;
+    const shown = wantType ? r.issues.filter(x => x.type === wantType) : r.issues;
+    for (const i of shown.slice(0, wantType ? 40 : 8)) console.log("  [问题]", i.path, i.message);
     for (const o of r.orphans.slice(0, 5)) console.log("  [孤立]", o.rel);
     summary.push("lint:" + r.issues.length + "问题/" + r.orphans.length + "孤立/" + r.stale.length + "stale");
   }
@@ -999,7 +1200,7 @@ async function main() {
   if (RUN.sync) {
     console.log("\n== sync ==");
     if (DRY) {
-      const syncPages = pages.filter(p => !SYNC_EXCLUDE.has(p.cat) && p.fm.status !== "archived" && String(p.fm.recall).toLowerCase() !== "false");
+      const syncPages = pages.filter(shouldSyncPage);
       let chunks = 0; const perCat = {};
       for (const pg of syncPages) { const n = chunkPage(pg).length; chunks += n; perCat[pg.cat] = (perCat[pg.cat] || 0) + n; }
       console.log("(--dry-run) 同步页:", syncPages.length, "H2 块:", chunks, JSON.stringify(perCat));
