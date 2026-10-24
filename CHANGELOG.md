@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0 — 2026-10-24
+
+### 新增
+- 画像结构化本体 profile-schema.json（6 域 × 2 = 12 槽，含允许值/正反例/更新规则/关键词）。
+- 抽取端落槽 + 引文保真校验：quote 必须是用户原话子串，否则丢弃（实测 17.5%）。
+- 决策标签 ADD/UPDATE/NOOP/CONFLICT/EXPIRE/ORPHAN；冲突分 temporal/factual/contextual，支持反义词对识别。
+- 决策引擎评测 eval-profile.mjs：8 个隔离用例（时间更新/冲突/覆盖/弃权/过期/槽位），当前 8/8。
+- 安装脚本同步 profile-schema.json 到 bin。
+
+### 修复
+- NOOP 过宽导致真更新被误杀（同槽同对象即判覆盖）。
+- 反义冲突（免费 vs 付费）被误判为 UPDATE。
+- 旧正则路径候选缺 decision 字段。
+
 ## 0.9.2 — 2026-10-24
 
 - 新增 `RELEASE.md` 发布清单与 `scripts/release.ps1`：校验版本/工作树/语法/密钥，打 tag、推送、用 CHANGELOG 段落创建 GitHub Release，并校验 latest。

@@ -2,6 +2,7 @@
 // profile-extract.mjs v3 —— 会话 → 偏好证据包（行为事件 + LLM/规则抽取，只读）
 // 用法: node profile-extract.mjs [--since 7d] [--out D:/DB/DSH/reports/profile-evidence] [--max 20] [--no-llm]
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import { zstdDecompressSync } from "node:zlib";
@@ -47,6 +48,26 @@ const CORRECT = /(不要|别(?!的)|禁止|必须|不对|错了|重写|别这样
 const PROCESS_STRONG = /(先.{0,10}(再|然后)|(方案|计划).{0,12}审核|先.{0,6}(方案|计划)|拆解|小步|复盘)/;
 const TASK_START = /^(把|请|帮我|给我|打开|开启|关闭|删除|安装|运行|执行|检查|看一下|查一下|改一下|处理|解决|接着|按照|顺着|观察|跑通|按)/;
 const TASK_OBJ = /https?:|\\\\|\.md\b|\d+\.\d+\.\d+|github|仓库|欠债|巡检|pcie|aspm/i;
+// ── 槽位本体 + 引文保真校验 ──
+const PROFILE_SCHEMA = (() => { try { return JSON.parse(fs.readFileSync(process.env.PROFILE_SCHEMA || fileURLToPath(new URL("./profile-schema.json", import.meta.url)), "utf8")); } catch { return { slots: [] }; } })();
+const SLOTS_DEF = PROFILE_SCHEMA.slots || [];
+const normCmp = x => String(x || "").replace(/[\s，。！？、；：""''（）()\[\]<>《》…·,.;:!?"']/g, "").toLowerCase();
+function slotOfText(text) {
+  const t = normCmp(text); let best = "unclassified", bs = 0;
+  for (const s of SLOTS_DEF) {
+    let score = 0;
+    for (const k of (s.keywords || [])) if (t.includes(normCmp(k))) score += 2;
+    if (t.includes(normCmp(s.name))) score += 3;
+    if (score > bs) { bs = score; best = s.id; }
+  }
+  return bs > 0 ? best : "unclassified";
+}
+function quoteSupported(quote, messages) {
+  const q = normCmp(quote);
+  if (q.length < 6) return false;
+  return messages.some(m => normCmp(m).includes(q));
+}
+
 function isObviousNoise(x) {
   const rule = String(x.rule || "");
   if (!rule || rule.length > 60) return true;
@@ -201,7 +222,7 @@ function recapPack(p) {
 
 const cache = readJson(RECAPS ? path.join(outDir, MULTI ? ".recap-cache-multi.json" : ".recap-cache.json") : CACHE);
 const evidence = [];
-const stats = { sessions: 0, cached: 0, llm: 0, rule: 0, failed: 0, filtered: 0, models: {} };
+const stats = { sessions: 0, cached: 0, llm: 0, rule: 0, failed: 0, filtered: 0, quoteDropped: 0, models: {} };
 const retryQueue = [];
 const limit = RECAPS ? Math.min(jobs.length, maxSessions > 20 ? maxSessions : 25) : jobs.length;
 
@@ -233,10 +254,13 @@ async function processJob(j) {
   let items = [];
   if (!NO_LLM) { try { const r = await (MULTI ? llmExtractMulti(pack) : llmExtract(pack)); items = r.items; if (items.length) { stats.llm++; stats.models[r.model] = (stats.models[r.model] || 0) + 1; } } catch { stats.failed++; } }
   if (!items.length) { retryQueue.push({ sessionId: pack.sid, date: pack.date, project: pack.project }); items = ruleExtract(pack.messages).map(x => ({ ...x, confidence: 0.55 })); if (items.length) stats.rule++; }
-  const enriched = items.map(x => ({ ...x, source: RECAPS ? "recap" : "extract", sessionId: pack.sid, project: pack.project, date: pack.date }));
+  const quoteOk = items.filter(x => quoteSupported(x.quote || "", pack.messages));
+  const quoteDropped = items.length - quoteOk.length;
+  const enriched = quoteOk.map(x => ({ ...x, slot: slotOfText(x.rule + " " + (x.quote || "")), source: RECAPS ? "recap" : "extract", sessionId: pack.sid, project: pack.project, date: pack.date }));
   cache[j.sid] = { mtime: j.mtime, items: enriched };
   const kept = enriched.filter(x => !isObviousNoise(x));
   stats.filtered += enriched.length - kept.length;
+  stats.quoteDropped += quoteDropped;
   evidence.push(...kept);
   stats.sessions++;
 }
@@ -256,4 +280,4 @@ const byType = {};
 for (const e of evidence) byType[e.type] = (byType[e.type] || 0) + 1;
 if (retryQueue.length) writeJson(path.join(outDir, ".retry-queue.json"), { updatedAt: new Date().toISOString(), items: retryQueue });
 else { try { fs.rmSync(path.join(outDir, ".retry-queue.json"), { force: true }); } catch {} }
-console.log(JSON.stringify({ date: TODAY, mode: RECAPS ? "recaps" : "sessions", sessions: stats.sessions, cached: stats.cached, llm: stats.llm, rule: stats.rule, failed: stats.failed, filtered: stats.filtered, models: stats.models, evidence: evidence.length, byType, out: outFile }));
+console.log(JSON.stringify({ date: TODAY, mode: RECAPS ? "recaps" : "sessions", sessions: stats.sessions, cached: stats.cached, llm: stats.llm, rule: stats.rule, failed: stats.failed, filtered: stats.filtered, quoteDropped: stats.quoteDropped, models: stats.models, evidence: evidence.length, byType, out: outFile }));

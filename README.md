@@ -47,6 +47,8 @@
 | 融合检索 | `scripts/wiki-retrieval.mjs` | 同上 |
 | 查询路由 | `scripts/wiki-router.mjs` | 同上 |
 | 画像抽取 | `scripts/profile-extract.mjs` | 同上 |
+| 画像本体 | `scripts/profile-schema.json` | 同上（12 槽 = 6 域 × 2） |
+| 决策评测 | `scripts/eval-profile.mjs` | 开发/CI 用，8 个隔离用例 |
 | 画像蒸馏 | `scripts/profile-distill.mjs` | 同上 |
 | 编译候选 | `scripts/session-compile-candidates.mjs` | 同上 |
 | stale 复核 | `scripts/stale-review.mjs` | 同上 |
@@ -118,7 +120,7 @@ node ~/.dsh/bin/wiki-retrieval.mjs "关键词" --limit 5 --json
 
 融合策略：BM25 + mnemon 向量 RRF（K=5，权重 1.0/0.5，标题加权 4）。调参用 `LLM_WIKI_RRF_K / _WB / _WM / TITLE_BOOST / CAT_WEIGHT`。
 
-## 画像蒸馏
+## 画像蒸馏（v3：本体 + 决策 + 保真）
 
 ```bash
 node ~/.dsh/bin/profile-extract.mjs --since 30d    # 3 角度抽取 + 行为事件
@@ -126,9 +128,13 @@ node ~/.dsh/bin/profile-distill.mjs --since 30d    # 复核 → 候选 → USER.
 ```
 
 - **规则进 USER.md**（每轮注入，≤2KB 目标），**证据留画像页**（`profile_scope: evidence`）与记忆空间；
+- 12 槽本体（6 域 × 2），抽取必须落槽，落不到记 unclassified 交复核；
+- 引文保真：quote 必须是用户原话子串（≥6 字），否则丢弃（实测约 17%）；
+- 决策标签 ADD/UPDATE/NOOP/CONFLICT/EXPIRE；CONFLICT 带 temporal/factual/contextual 类型；
 - 抽取免费（Z.ai GLM-4-Flash 优先），复核固定 DeepSeek 官网 `deepseek-flash`；
 - 候选按「红线 3 / 沟通 2 / 工作 5 / 其他 2」配额，上限 12 条；
-- 应用只经 `mnemon_runtime_memory`，并回写画像页演变记录。
+- 应用只经 `mnemon_runtime_memory`，并回写画像页演变记录；
+- 自测：node scripts/eval-profile.mjs（8 用例：时间更新/冲突/覆盖/弃权/过期/槽位）。
 
 ## 自动化与健康
 
@@ -152,6 +158,8 @@ node ~/.dsh/bin/profile-distill.mjs --since 30d    # 复核 → 候选 → USER.
 | `LLM_WIKI_REVIEW_ENDPOINT` | `https://api.deepseek.com/v1` | 官网端点 |
 | `LLM_WIKI_REPORTS` | `D:\DB\DSH\reports` | 候选/清单/健康/周报输出目录 |
 | `PROFILE_MAX_ADD` | `12` | 单批候选上限 |
+| `PROFILE_SCHEMA` | 同目录 profile-schema.json | 画像本体路径 |
+| `PROFILE_REVIEW` | 开 | off 跳过复核（仅测试） |
 | `LLM_WIKI_COMPILE_HINT` | 开 | 设 `off` 关闭会话编译提示 |
 | `LLM_WIKI_RRF_K / _WB / _WM / TITLE_BOOST` | `5 / 1.0 / 0.5 / 4` | 融合检索调参 |
 
@@ -202,6 +210,7 @@ dsh-llm-wiki/
 
 ## 版本
 
+- `0.10.0`：画像本体（12 槽）+ 决策标签 + 引文保真 + 决策引擎评测 8/8；安装脚本同步 schema。
 - `0.9.0`：检索路由 + 融合检索；画像 v3（证据管线/复核/预算）；编译候选、stale 复核、健康快照；发现分级同步；会话编译提示。
 - `0.8.0`：DSH 桌面版适配（zstd、mnemon.exe、embedding 注入、Windows 任务）。
 

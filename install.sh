@@ -31,6 +31,7 @@ cp "$REPO/skills/wiki-write/SKILL.md" "$HOME/.agents/skills/wiki-write/"
 echo "==> 3/5 脚本 -> $BIN/"
 mkdir -p "$BIN"
 for s in $SCRIPTS; do cp "$REPO/scripts/$s" "$BIN/"; chmod +x "$BIN/$s"; done
+cp "$REPO/scripts/profile-schema.json" "$BIN/"
 echo "==> 4/5 systemd 单元 -> ~/.config/systemd/user/"
 mkdir -p "$HOME/.config/systemd/user"
 cp "$REPO/systemd/llm-wiki-pipeline.service" "$REPO/systemd/llm-wiki-pipeline.timer" "$REPO/systemd/embed-proxy.service" "$HOME/.config/systemd/user/"

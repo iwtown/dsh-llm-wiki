@@ -2,6 +2,7 @@
 // profile-distill.mjs v2 —— 画像蒸馏（只读）：画像页 + 会话 + 记忆空间 + USER.md → 候选/冲突/过期/预算
 // 用法: node profile-distill.mjs [--since 7d] [--out D:/DB/DSH/reports] [--max 30] [--profile <画像页>]
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import { zstdDecompressSync } from "node:zlib";
@@ -23,7 +24,7 @@ const TODAY = new Date().toISOString().slice(0, 10);
 const readText = p => { try { return fs.readFileSync(p, "utf8"); } catch { return ""; } };
 const userEntries = () => readText(USER_MD).split(/\u00a7/).map(s => s.trim()).filter(Boolean);
 const norm = s => String(s).replace(/[\s，。！？、；：""''（）()\[\]]/g, "").toLowerCase();
-const POL = t => /(不要|不用|禁止|绝不|别再|不需要|不擅自|不得|严禁|勿|无需)/.test(String(t));
+const POL = t => /(不要|不用|不走|不写|不装|不改|不允许|禁止|绝不|别再|不需要|不擅自|不得|严禁|勿|无需|避免|杜绝|拒绝)/.test(String(t));
 const TOPICS = ["代理","v2ray","模型","provider","免费","token","成本","语言","中文","英文","格式","表格","简洁","详细","计划","验证","测试","删除","密钥","路径","端口","git","python","node","代码","工具","插件","依赖","风险","方案","长度","时间","备份","同步","记忆","结论","展开","流水账","改页","wiki","mnemon","环境","隐私","权限","组件","身份"];
 const topicsOf = t => TOPICS.filter(x => String(t).includes(x));
 const overlaps = (a, b) => { const B = new Set(topicsOf(b)); return topicsOf(a).filter(x => B.has(x)).length; };
@@ -155,7 +156,7 @@ for (const g of groups.values()) {
   else if (current.some(c => overlaps(c, g.text) >= 2 && POL(c) === POL(g.text))) action = "refresh";
   else if (current.some(c => norm(g.text).includes(norm(c)) && norm(g.text).length > norm(c).length + 4)) action = "refine";
   if (matchProf && !matchUser) action = "promote"; // 画像页 active 但 USER.md 缺失
-  candidates.push({ kind: "evidence", action, text: g.text.slice(0, 70), confidence, count, lastDate,
+  candidates.push({ kind: "evidence", action, decision: "ADD", slot: "unclassified", text: g.text.slice(0, 70), confidence, count, lastDate,
     conflictsWith: current.find(c => POL(c) !== POL(g.text) && overlaps(c, g.text) >= 1) || "",
     profileRule: matchProf ? matchProf.rule : "", quotes: g.quotes });
 }
@@ -197,6 +198,7 @@ async function callReview(prompt, maxTokens = 800) {
   throw lastErr || new Error("review failed");
 }
 async function reviewEvidence(groups) {
+  if (process.env.PROFILE_REVIEW === "off") { const c = {}; for (const [k] of groups) c[k] = { keep: true, reason: "review off" }; return c; }
   const cache = readJson(REVIEW_CACHE);
   const todo = [];
   const TYPE_AUTO = new Set(["decision_pattern", "work_habit", "anti_preference"]);
@@ -231,11 +233,12 @@ async function reviewEvidence(groups) {
 const evGroups = new Map();
 for (const e of evidence) {
   const key = norm(e.rule).slice(0, 60);
-  if (!evGroups.has(key)) evGroups.set(key, { rule: e.rule, type: e.type, polarity: e.polarity, scope: e.scope, confidence: e.confidence || 0.6, sessions: new Set(), dates: [], quotes: [] });
+  if (!evGroups.has(key)) evGroups.set(key, { rule: e.rule, type: e.type, polarity: e.polarity, scope: e.scope, confidence: e.confidence || 0.6, sessions: new Set(), dates: [], quotes: [], slots: {} });
   const g = evGroups.get(key);
   g.sessions.add(e.sessionId);
   if (e.date) g.dates.push(e.date);
   g.confidence = Math.max(g.confidence, e.confidence || 0);
+  if (e.slot) g.slots[e.slot] = (g.slots[e.slot] || 0) + 1;
   if (g.quotes.length < 3) g.quotes.push({ sessionId: e.sessionId, date: e.date, text: e.quote || e.rule });
 }
 // 同义/错别字模糊合并（同极性、Jaccard≥0.5 或包含关系）
@@ -261,7 +264,56 @@ for (const [key, g] of evGroups) {
   mg.dates.push(...g.dates);
   for (const q of g.quotes) if (mg.quotes.length < 6) mg.quotes.push(q);
   mg.confidence = Math.max(mg.confidence, g.confidence);
+  for (const [k, v] of Object.entries(g.slots || {})) mg.slots[k] = (mg.slots[k] || 0) + v;
 }
+// ── 槽位本体（schema v1）──
+const SCHEMA = (() => { try { return JSON.parse(fs.readFileSync(process.env.PROFILE_SCHEMA || fileURLToPath(new URL("./profile-schema.json", import.meta.url)), "utf8")); } catch { return { slots: [] }; } })();
+const SLOTS = SCHEMA.slots || [];
+function slotOf(text) {
+  const t = norm(text); let best = "unclassified"; let bs = 0;
+  for (const s of SLOTS) {
+    let score = 0;
+    for (const k of (s.keywords || [])) if (t.includes(norm(k))) score += 2;
+    if (t.includes(norm(s.name))) score += 3;
+    if (score > bs) { bs = score; best = s.id; }
+  }
+  return bs > 0 ? best : "unclassified";
+}
+const ANT_PAIRS = [[/免费/, /付费/], [/开启/, /关闭/], [/允许/, /禁止/], [/本地/, /远程/], [/保留/, /删除/], [/默认/, /显式/], [/冒烟/, /回归/], [/小步/, /一次到底/]];
+function contrasts(a, b) {
+  const A = String(a), B = String(b);
+  return ANT_PAIRS.some(([x, y]) => (x.test(A) && y.test(B)) || (y.test(A) && x.test(B)));
+}
+function opposes(a, b) {
+  const pos = /(允许|应该|必须|可以|建议|默认走)/, neg = /(不要|不用|不走|不写|不装|不改|不允许|禁止|不得|严禁|别|避免)/;
+  return (pos.test(a) && neg.test(b)) || (pos.test(b) && neg.test(a));
+}
+const CORE_OBJECT = /(轮子|代理|免责|方案|计划|测试|验证|依赖|插件|模型|目录|配置|啰嗦|自检|优先级|阶段|复核|归档)/g;
+function sharedBigrams(a, b) {
+  const bg = s => { const t = new Set(); for (let i = 0; i < s.length - 1; i++) t.add(s.slice(i, i + 2)); return t; };
+  const A = bg(norm(a)), B = bg(norm(b));
+  let hit = 0; for (const x of A) if (B.has(x)) hit++;
+  return hit;
+}
+function sameObject(a, b) {
+  const A = String(a).match(CORE_OBJECT) || [], B = String(b).match(CORE_OBJECT) || [];
+  return A.some(x => B.includes(x));
+}
+function coveredBy(rule, existing) {
+  const bigrams = s => { const t = new Set(); for (let i = 0; i < s.length - 1; i++) t.add(s.slice(i, i + 2)); return t; };
+  const a = bigrams(norm(rule)), b = bigrams(norm(existing));
+  if (!a.size || !b.size) return false;
+  let hit = 0; for (const x of a) if (b.has(x)) hit++;
+  return hit / a.size >= 0.6;
+}
+function classifyConflict(existing, rule) {
+  if (/(以后|现在|改成|换成|改为|不再|已经)/.test(rule)) return "temporal";
+  if (contrasts(existing, rule)) return "factual";
+  const hard = /(只|仅|必须|禁止|默认|全部)/;
+  if (hard.test(existing) && hard.test(rule)) return "factual";
+  return "contextual";
+}
+
 const review = await reviewEvidence(mergedGroups);
 for (const g of mergedGroups.values()) {
   const rk = norm(g.rule).slice(0, 60);
@@ -275,32 +327,58 @@ for (const g of mergedGroups.values()) {
   const lastDate = g.dates.sort().slice(-1)[0] || "";
   const matchUser = current.find(c => { const n = norm(c), m = norm(g.rule); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))); });
   const matchProf = [...profByNorm.values()].find(p => { const n = norm(p.rule), m = norm(g.rule); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))); });
+  const slot = slotOf(g.rule);
   let action = "add";
   if (matchUser) action = "refresh";
-  else if (current.some(c => POL(c) !== POL(g.rule) && overlaps(c, g.rule) >= 2)) action = "supersede";
+  else if (current.some(c => contrasts(g.rule, c) || (POL(c) !== POL(g.rule) && overlaps(c, g.rule) >= 1 && opposes(g.rule, c)))) action = "supersede";
   else if (current.some(c => overlaps(c, g.rule) >= 2 && POL(c) === POL(g.rule))) action = "refresh";
   else if (current.some(c => overlaps(c, g.rule) >= 1)) action = "refine";
   else if (current.some(c => norm(g.rule).includes(norm(c)) && norm(g.rule).length > norm(c).length + 4)) action = "refine";
   if (matchProf && !matchUser) action = "promote";
-  candidates.push({ kind: "evidence-v3", action, text: g.rule.slice(0, 70), type: g.type, confidence: g.confidence, count, lastDate,
-    conflictsWith: current.find(c => POL(c) !== POL(g.rule) && overlaps(c, g.rule) >= 1) || "", profileRule: matchProf ? matchProf.rule : "", quotes: g.quotes });
+  const conflictsWith = current.find(c => POL(c) !== POL(g.rule) && overlaps(c, g.rule) >= 1) || "";
+  let decision = "ADD";
+  if (matchUser) decision = "NOOP";
+  else if (action === "supersede") decision = "CONFLICT";
+  else if (action === "refine" || action === "refresh") decision = "UPDATE";
+  if (decision !== "NOOP" && decision !== "CONFLICT" && current.some(c => coveredBy(g.rule, c) || (POL(c) === POL(g.rule) && sameObject(g.rule, c) && sharedBigrams(g.rule, c) >= 2))) decision = "NOOP";
+  const conflictType = decision === "CONFLICT" ? classifyConflict(conflictsWith, g.rule) : null;
+  candidates.push({ kind: "evidence-v3", action, decision, slot, conflictType, text: g.rule.slice(0, 70), type: g.type, confidence: g.confidence, count, lastDate,
+    conflictsWith, profileRule: matchProf ? matchProf.rule : "", quotes: g.quotes });
 }
 
 // 画像页自身检查：过期 / 无证据 / 与 USER.md 不一致
 for (const p of profile) {
   if (p.validity && p.validity !== "永久" && p.validity < TODAY && p.status === "active")
-    candidates.push({ kind: "profile", action: "expire", text: p.rule, section: p.section, confidence: 0.9, count: p.evidenceCount, validity: p.validity });
+    candidates.push({ kind: "profile", action: "expire", decision: "EXPIRE", slot: slotOf(p.rule), text: p.rule, section: p.section, confidence: 0.9, count: p.evidenceCount, validity: p.validity });
   if (p.status === "active" && p.evidenceCount === 0)
-    candidates.push({ kind: "profile", action: "orphan-evidence", text: p.rule, section: p.section, confidence: 0.6, count: 0 });
+    candidates.push({ kind: "profile", action: "orphan-evidence", decision: "ORPHAN", slot: slotOf(p.rule), text: p.rule, section: p.section, confidence: 0.6, count: 0 });
   const inUser = current.some(c => { const n = norm(c), m = norm(p.rule); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))) || (overlaps(c, p.rule) >= 2 && POL(c) === POL(p.rule)); });
   if (p.status === "active" && !inUser)
-    candidates.push({ kind: "profile", action: "promote", text: p.rule, section: p.section, confidence: 0.8, count: p.evidenceCount });
+    candidates.push({ kind: "profile", action: "promote", decision: "ADD", slot: slotOf(p.rule), text: p.rule, section: p.section, confidence: 0.8, count: p.evidenceCount });
+}
+
+// ── 同槽近似候选合并（保留更长表述）──
+{
+  const kept = [];
+  for (const c of candidates) {
+    if (!["ADD", "UPDATE"].includes(c.decision)) { kept.push(c); continue; }
+    const hit = kept.find(x => x.decision === c.decision && x.slot === c.slot && (coveredBy(c.text, x.text) || coveredBy(x.text, c.text)));
+    if (hit) {
+      if (String(c.text).length > String(hit.text).length) hit.text = c.text;
+      hit.count = Math.max(hit.count || 0, c.count || 0);
+      hit.confidence = Math.max(hit.confidence || 0, c.confidence || 0);
+      hit.quotes = [...(hit.quotes || []), ...(c.quotes || [])].slice(0, 6);
+      continue;
+    }
+    kept.push(c);
+  }
+  candidates.length = 0; candidates.push(...kept);
 }
 
 // ── 预算 ──
 const userBytes = Buffer.byteLength(current.join("\u00a7"), "utf8");
 const LIMIT = 4096, TARGET = 2048;
-const adds = candidates.filter(c => ["add", "promote", "refine", "supersede"].includes(c.action));
+const adds = candidates.filter(c => ["ADD", "UPDATE"].includes(c.decision));
 let budget = [], bytes = userBytes;
 const MAX_ADD = Number(process.env.PROFILE_MAX_ADD || 12);
 const bucketOf = c => /(不要|禁止|必须|不得)/.test(c.text) || c.type === "anti_preference" ? "red"
@@ -322,19 +400,26 @@ const byAction = a => candidates.filter(c => c.action === a);
 const md = [];
 md.push("# 画像蒸馏候选 " + TODAY, "");
 const reviewed = Object.values(review || {}); md.push("> 只读：未写 USER.md。复核：" + reviewed.filter(x => x.keep).length + " keep / " + reviewed.filter(x => !x.keep).length + " drop。证据源：" + (evidence.length ? ("extract v3（" + evidence.length + " 条 / " + new Set(evidence.map(e => e.sessionId)).size + " 会话）") : "正则兜底") + " | 画像页条目 " + profile.length + " | USER.md " + current.length + " 条 " + userBytes + "B/" + LIMIT + "B | 证据窗口 " + sinceDays + "d | 会话 " + new Set(messages.filter(m => m.sessionId !== "memory-space").map(m => m.sessionId)).size + " 个", "");
-md.push("## 建议新增（" + budget.filter(c => c.action === "add").length + "）", "");
-for (const c of budget.filter(c => c.action === "add")) md.push("- [置信 " + c.confidence + " / 证据 " + c.count + " 次 / 最近 " + (c.lastDate || "-") + "] " + c.text);
-md.push("", "## 画像页已有、USER.md 缺失 → 建议提升（" + budget.filter(c => c.action === "promote").length + "）", "");
-for (const c of budget.filter(c => c.action === "promote")) md.push("- [] " + c.text);
-md.push("", "## 细化（" + budget.filter(c => c.action === "refine").length + "）", "");
-for (const c of budget.filter(c => c.action === "refine")) md.push("- 新表述：" + c.text + (c.profileRule ? "（画像页：" + c.profileRule.slice(0, 40) + "）" : ""));
-md.push("", "## 冲突（" + byAction("supersede").length + "）", "");
-for (const c of byAction("supersede")) md.push("- 新：" + c.text + " ↔ 现有：" + c.conflictsWith.slice(0, 60));
-md.push("", "## 过期 / 无证据（" + (byAction("expire").length + byAction("orphan-evidence").length) + "）", "");
-for (const c of byAction("expire")) md.push("- [过期 " + c.validity + "] " + c.text);
-for (const c of byAction("orphan-evidence")) md.push("- [无证据] " + c.text);
-md.push("", "## 已覆盖（跳过，" + byAction("refresh").length + "）", "");
-for (const c of byAction("refresh").slice(0, 8)) md.push("- " + c.text);
+const byDecision = dec => candidates.filter(c => c.decision === dec);
+md.push("## ADD 新增（候选 " + byDecision("ADD").length + " / 入预算 " + budget.filter(c => c.decision === "ADD").length + "）", "");
+for (const c of budget.filter(c => c.decision === "ADD")) md.push("- [" + c.slot + " | 置信 " + c.confidence + " | 证据 " + c.count + " 次 / 最近 " + (c.lastDate || "-") + "] " + c.text);
+md.push("", "## UPDATE 更新（" + budget.filter(c => c.decision === "UPDATE").length + "）", "");
+for (const c of budget.filter(c => c.decision === "UPDATE")) md.push("- [" + c.slot + "] " + c.text + (c.profileRule ? "（画像页：" + c.profileRule.slice(0, 40) + "）" : ""));
+md.push("", "## NOOP 已覆盖（" + byDecision("NOOP").length + "）", "");
+for (const c of byDecision("NOOP").slice(0, 8)) md.push("- [" + c.slot + "] " + c.text);
+md.push("", "## CONFLICT 冲突（" + byDecision("CONFLICT").length + "）", "");
+for (const c of byDecision("CONFLICT")) md.push("- [" + (c.conflictType || "contextual") + " | " + c.slot + "] 新：" + c.text + " ↔ 现有：" + (c.conflictsWith || "").slice(0, 60));
+md.push("", "## EXPIRE / ORPHAN（" + (byDecision("EXPIRE").length + byDecision("ORPHAN").length) + "）", "");
+for (const c of byDecision("EXPIRE")) md.push("- [过期 " + (c.validity || "") + " | " + c.slot + "] " + c.text);
+for (const c of byDecision("ORPHAN")) md.push("- [无证据 | " + c.slot + "] " + c.text);
+md.push("", "## 槽位覆盖", "");
+const slotCount = {};
+for (const c of candidates) if (c.slot && c.slot !== "unclassified") slotCount[c.slot] = (slotCount[c.slot] || 0) + 1;
+const covered = Object.keys(slotCount).length, total = SLOTS.length || 1;
+md.push("- 候选覆盖槽位 " + covered + "/" + total + "：" + Object.entries(slotCount).map(([k, v]) => k + "=" + v).join("，"));
+const uncl = candidates.filter(c => c.slot === "unclassified").length;
+if (uncl) md.push("- unclassified " + uncl + " 条（交复核，不直接入画像）");
+md.push("");
 md.push("", "## 预算", "", "- 当前 " + userBytes + "B / 上限 " + LIMIT + "B；目标 " + TARGET + "B；本批可写 " + budget.length + " 条 → " + bytes + "B", "");
 if (userBytes > LIMIT * 0.8) md.push("- ⚠ 已超 80% 预算，需产淘汰候选（stale → 低重要度 → 最久未确认）", "");
 md.push("## 证据附录", "");
@@ -347,7 +432,7 @@ fs.writeFileSync(base + ".jsonl", candidates.map(c => JSON.stringify(c)).join("\
 const diff = [];
 diff.push("# 建议的 USER.md 变更（人工确认后经 mnemon_runtime_memory 应用）");
 diff.push("# 当前 " + userBytes + "B / " + current.length + " 条；建议后 " + bytes + "B / " + (current.length + budget.length) + " 条");
-for (const c of budget) diff.push((c.action === "refine" ? "~ " : "+ ") + c.text);
+for (const c of budget) diff.push((c.decision === "UPDATE" ? "~ " : "+ ") + "[" + c.slot + "] " + c.text);
 for (const c of byAction("supersede")) diff.push("~ 替换：" + c.conflictsWith.slice(0, 50) + " → " + c.text);
 for (const c of byAction("expire")) diff.push("- 过期候选：" + c.text);
 fs.writeFileSync(path.join(outDir, "profile-diff-" + TODAY + ".txt"), diff.join("\n") + "\n", "utf8");
@@ -355,4 +440,5 @@ console.log(JSON.stringify({ reviewModels: reviewModelsUsed,  date: TODAY, profi
   candidates: candidates.length, budget: budget.length, actions: { add: byAction("add").length, promote: byAction("promote").length,
   refine: byAction("refine").length, supersede: byAction("supersede").length, expire: byAction("expire").length,
   orphan: byAction("orphan-evidence").length, refresh: byAction("refresh").length },
+  decisions: { ADD: byDecision("ADD").length, UPDATE: byDecision("UPDATE").length, NOOP: byDecision("NOOP").length, CONFLICT: byDecision("CONFLICT").length, EXPIRE: byDecision("EXPIRE").length, ORPHAN: byDecision("ORPHAN").length },
   md: base + ".md", jsonl: base + ".jsonl", diff: path.join(outDir, "profile-diff-" + TODAY + ".txt") }));

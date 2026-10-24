@@ -35,6 +35,7 @@ if ($Uninstall) {
   Remove-IfExists (Join-Path $Home2 '.agents\skills\wiki-search')
   Remove-IfExists (Join-Path $Home2 '.agents\skills\wiki-write')
   foreach ($s in $Scripts) { Remove-IfExists (Join-Path $Bin $s) }
+  Remove-IfExists (Join-Path $Bin 'profile-schema.json')
   foreach ($w in $Wrappers) { Remove-IfExists (Join-Path $Bin $w) }
   foreach ($t in $Tasks) { schtasks /Delete /TN $t /F 2>$null | Out-Null }
   Write-Host ('    Files removed. Remove the llm-wiki insert from ' + $ProfileDir + '\cordis.patch.yml manually.')
