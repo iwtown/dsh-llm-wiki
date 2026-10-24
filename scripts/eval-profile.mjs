@@ -27,6 +27,7 @@ const cases = [
   { id: "unclassified", rules: [], evidence: [{ type: "explicit_correction", rule: "我喜欢蓝色", quote: "我喜欢蓝色", polarity: "positive" }], expect: { slot: "unclassified" } },
   { id: "orphan", rules: ["无证据规则 ｜ 置信 high ｜ 有效期 2027-01-01 ｜ 状态 active"], evidence: [], expect: { decision: "ORPHAN" } },
   { id: "threshold-single", rules: [], evidence: [{ type: "explicit_instruction", rule: "以后先给结论再解释", quote: "以后先给结论", polarity: "positive" }], expect: { count: 0 } },
+  { id: "noise-narrative", rules: [], evidence: [{ type: "explicit_correction", rule: "否定agent行为，要求卸载并改用方案", quote: "卸载 kb-sieve", polarity: "negative" }], expect: { count: 0 } },
   { id: "add-slot", rules: [], evidence: [{ type: "explicit_correction", rule: "先给结论再解释", quote: "以后先给结论", polarity: "positive" }], expect: { decision: "ADD", slot: "comm.answer_first" } }
 ];
 const results = [];

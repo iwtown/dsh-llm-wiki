@@ -322,6 +322,7 @@ const review = await reviewEvidence(mergedGroups);
 for (const g of mergedGroups.values()) {
   const rk = norm(g.rule).slice(0, 60);
   if (review[rk] && review[rk].keep === false) continue;
+  if (/^(否定|指出|要求|说明|确认|回复|表示)/.test(String(g.rule || ""))) continue;
   const count = g.sessions.size;
   const PROCESS_RULE = /(先.{0,10}(再|然后)|方案|计划|审核|复盘|拆解|小步)/;
   const need = (g.type === "explicit_correction" || g.type === "anti_preference") ? 1
@@ -331,7 +332,8 @@ for (const g of mergedGroups.values()) {
   const lastDate = g.dates.sort().slice(-1)[0] || "";
   const matchUser = current.find(c => { const n = norm(c), m = norm(g.rule); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))); });
   const matchProf = [...profByNorm.values()].find(p => { const n = norm(p.rule), m = norm(g.rule); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))); });
-  const slot = slotOf(g.rule);
+  const slotTop = Object.entries(g.slots || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || "unclassified";
+  const slot = slotTop !== "unclassified" ? slotTop : slotOf(g.rule);
   let action = "add";
   if (matchUser) action = "refresh";
   else if (current.some(c => contrasts(g.rule, c) || (POL(c) !== POL(g.rule) && overlaps(c, g.rule) >= 1 && opposes(g.rule, c)))) action = "supersede";

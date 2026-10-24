@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.4 — 2026-10-24
+
+- 修复：候选槽位在证据多数为 unclassified 时不回退计算，导致已落槽规则显示 unclassified。
+- 过滤动作叙述型噪声（否定/指出/要求/说明…），不再当作规则候选。
+- 评测新增 noise-narrative 用例（13 用例）。
+
 ## 0.10.3 — 2026-10-24
 
 - 新增 eval-retrieval.mjs：6 条 fixture 查询跑 BM25 检索，检查 top-3 命中，无网络/无 mnemon。
