@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.5 — 2026-10-24
+
+- schema 关键词补充：调研/已有方案/评估（work.approach）、目标/验收/瞎猜（work.plan_first）、边界/前提/适用范围（comm.answer_first）。
+- 配合用户画像新增偏好：先调研评估、目标导向先验证、结论标边界。
+
 ## 0.10.4 — 2026-10-24
 
 - 修复：候选槽位在证据多数为 unclassified 时不回退计算，导致已落槽规则显示 unclassified。
