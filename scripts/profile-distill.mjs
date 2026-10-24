@@ -401,6 +401,30 @@ for (const c of adds.sort((a, b) => b.confidence - a.confidence || b.count - a.c
   budget.push(c); bytes += size; usedBucket[bk]++;
 }
 
+// ── 预算淘汰建议（超目标时；只提案，不自动删）──
+const sizeOf = t => Buffer.byteLength(t, "utf8") + 8;
+const placed = new Set(budget.map(c => c.text));
+const pendingAdds = adds.filter(c => !placed.has(c.text));
+const evictions = [];
+const PROTECT = /(代理|模型|token|偏好|红线|禁止|必须|隐私|密钥|方案|计划|结论|验证|目标|最小实现|外科|调研|边界|歧义|自主|依赖|免责|产出)/;
+if (pendingAdds.length || bytes > TARGET) {
+  const scored = current.map((text, i) => {
+    const pe = [...profByNorm.values()].find(pp => { const n = norm(pp.rule), m = norm(text); return n === m || (n.length > 6 && (n.includes(m) || m.includes(n))); });
+    const ev = pe ? pe.evidenceCount : 1;
+    const conf = pe ? pe.conf : "medium";
+    return { text, i, ev, conf, val: pe ? (pe.validity || "") : "", protect: PROTECT.test(text) ? 2 : 0 };
+  });
+  scored.sort((a, b) => (a.ev + a.protect) - (b.ev + b.protect) || ((a.conf === "low" ? 0 : 1) - (b.conf === "low" ? 0 : 1)) || a.i - b.i);
+  let excess = bytes + pendingAdds.reduce((a, c) => a + sizeOf(c.text), 0) - TARGET;
+  for (const s of scored) {
+    if (excess <= 0 || evictions.length >= 5) break;
+    if (s.protect) continue;
+    evictions.push({ kind: "evict", text: s.text, evidenceCount: s.ev, confidence: s.conf, validity: s.val, reason: s.ev === 0 ? "无证据" : (s.conf === "low" ? "低置信" : "最久未确认") });
+    excess -= sizeOf(s.text);
+  }
+  var evictShortfall = Math.max(0, excess);
+}
+
 // ── 输出 ──
 const byAction = a => candidates.filter(c => c.action === a);
 const md = [];
@@ -426,6 +450,10 @@ md.push("- 候选覆盖槽位 " + covered + "/" + total + "：" + Object.entries
 const uncl = candidates.filter(c => c.slot === "unclassified").length;
 if (uncl) md.push("- unclassified " + uncl + " 条（交复核，不直接入画像）");
 md.push("");
+md.push("", "## 预算淘汰建议（" + evictions.length + "）", "");
+for (const e of evictions) md.push("- [" + e.reason + " | 证据 " + e.evidenceCount + " 次] " + e.text.slice(0, 60));
+if (!evictions.length) md.push("- 无（预算内）");
+if (typeof evictShortfall === "number" && evictShortfall > 0) { md.push("- 仍需再释放约 " + evictShortfall + "B"); if (!evictions.length) md.push("- 无低价值可自动建议；需人工选择：合并相近规则 / 降重要性 / 删除已过期规则"); }
 md.push("", "## 预算", "", "- 当前 " + userBytes + "B / 上限 " + LIMIT + "B；目标 " + TARGET + "B；本批可写 " + budget.length + " 条 → " + bytes + "B", "");
 if (userBytes > LIMIT * 0.8) md.push("- ⚠ 已超 80% 预算，需产淘汰候选（stale → 低重要度 → 最久未确认）", "");
 md.push("## 证据附录", "");
@@ -441,10 +469,11 @@ diff.push("# 当前 " + userBytes + "B / " + current.length + " 条；建议后 
 for (const c of budget) diff.push((c.decision === "UPDATE" ? "~ " : "+ ") + "[" + c.slot + "] " + c.text);
 for (const c of byAction("supersede")) diff.push("~ 替换：" + c.conflictsWith.slice(0, 50) + " → " + c.text);
 for (const c of byAction("expire")) diff.push("- 过期候选：" + c.text);
+for (const e of evictions) diff.push("- [淘汰建议/需确认] " + e.text);
 fs.writeFileSync(path.join(outDir, "profile-diff-" + TODAY + ".txt"), diff.join("\n") + "\n", "utf8");
 console.log(JSON.stringify({ reviewModels: reviewModelsUsed,  date: TODAY, profileEntries: profile.length, userEntries: current.length, userBytes,
   candidates: candidates.length, budget: budget.length, actions: { add: byAction("add").length, promote: byAction("promote").length,
   refine: byAction("refine").length, supersede: byAction("supersede").length, expire: byAction("expire").length,
-  orphan: byAction("orphan-evidence").length, refresh: byAction("refresh").length },
+  orphan: byAction("orphan-evidence").length, refresh: byAction("refresh").length }, evictions: evictions.length, leftoverAdds: pendingAdds.length,
   decisions: { ADD: byDecision("ADD").length, UPDATE: byDecision("UPDATE").length, NOOP: byDecision("NOOP").length, CONFLICT: byDecision("CONFLICT").length, EXPIRE: byDecision("EXPIRE").length, ORPHAN: byDecision("ORPHAN").length },
   md: base + ".md", jsonl: base + ".jsonl", diff: path.join(outDir, "profile-diff-" + TODAY + ".txt") }));
