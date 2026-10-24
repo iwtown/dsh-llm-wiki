@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1 — 2026-10-24
+
+- 新增 GitHub Actions `eval-profile`：push/PR 自动跑语法检查 + 8 用例决策评测，强制 100%。
+- `release.ps1` 增加本地门禁：eval 未 100% 直接拒绝发版。
+- RELEASE.md 增加 CI 门禁检查项。
+
 ## 0.10.0 — 2026-10-24
 
 ### 新增

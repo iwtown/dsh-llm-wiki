@@ -1,0 +1,25 @@
+name: eval-profile
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  profile-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: |
+          for f in scripts/*.mjs plugin/*.mjs; do node --check "$f"; done
+      - name: Profile decision eval
+        run: node scripts/eval-profile.mjs | tee eval.json
+      - name: Enforce 100% pass
+        run: |
+          node -e "const r=require('fs').readFileSync('eval.json','utf8'); const j=JSON.parse(r.slice(r.indexOf('{'),r.lastIndexOf('}')+1)); if(j.rate!==100){console.error('eval rate='+j.rate);process.exit(1)} console.log('eval 100% ('+j.cases+' cases)')"

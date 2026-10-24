@@ -20,6 +20,14 @@ $errs = $null; $toks = $null
 if ($errs.Count -gt 0) { throw ('install.ps1 parse error: ' + $errs[0].Message) }
 $leak = Select-String -Path 'scripts\*.mjs','plugin\*.mjs','install.ps1','README.md' -Pattern 'sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|C:\\Users\\[A-Za-z0-9_.-]+' -ErrorAction SilentlyContinue
 if ($leak) { throw ('secret/path leak: ' + ($leak | Select-Object -First 1).Path) }
+Write-Host '==> profile eval gate'
+$evalRaw = & node (Join-Path $Repo 'scripts\eval-profile.mjs') 2>&1 | Out-String
+$j0 = $evalRaw.IndexOf('{'); $j1 = $evalRaw.LastIndexOf('}')
+if ($j0 -lt 0 -or $j1 -le $j0) { throw 'eval-profile produced no JSON' }
+$ev = $evalRaw.Substring($j0, $j1 - $j0 + 1) | ConvertFrom-Json
+if ([int]$ev.rate -ne 100) { throw ('profile eval gate failed: ' + $ev.rate + '%') }
+Write-Host ('    eval ' + $ev.pass + '/' + $ev.cases)
+
 $cl = [IO.File]::ReadAllText((Join-Path $Repo 'CHANGELOG.md'), [Text.Encoding]::UTF8)
 $m = [regex]::Match($cl, '(?ms)^## ' + [regex]::Escape($Version) + ' [^\r\n]*\r?\n(.*?)(?=^## |\z)')
 if (-not $m.Success) { throw ('CHANGELOG missing section for ' + $Version) }

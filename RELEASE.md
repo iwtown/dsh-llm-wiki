@@ -22,6 +22,11 @@
 - [ ] 安装：隔离 HOME 跑 `install.ps1 -TaskPrefix TEST- -NoSchedule`，确认文件与 patch，再清理
 - [ ] 安全：仓库内无 `sk-`、`ghp_`、`C:\Users\<user>` 命中
 
+## 2.5 自动门禁（CI）
+
+- [ ] GitHub Actions `eval-profile` 为绿色（push/PR 触发，强制 8/8）
+- [ ] 本地 `scripts/release.ps1` 会先跑同一套 eval，未 100% 直接拒绝发布
+
 ## 3. 提交与打标
 
 ```powershell
