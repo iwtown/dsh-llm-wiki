@@ -205,6 +205,10 @@ dsh-llm-wiki/
 - `0.9.0`：检索路由 + 融合检索；画像 v3（证据管线/复核/预算）；编译候选、stale 复核、健康快照；发现分级同步；会话编译提示。
 - `0.8.0`：DSH 桌面版适配（zstd、mnemon.exe、embedding 注入、Windows 任务）。
 
+## 发布
+
+发版流程见 [RELEASE.md](./RELEASE.md)：版本三处一致 → 自测 → commit/tag → push → `scripts/release.ps1` 创建 GitHub Release 并校验 latest。
+
 ## License
 
 MIT
