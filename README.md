@@ -89,6 +89,7 @@ node ~/.dsh/bin/pipeline-health.mjs       # 生成首份健康快照
 | Profile Distill | 周日 09:00 | 画像候选 |
 | LLM-Wiki Compile Candidates | 周日 09:20 | 未编译会话候选 |
 | LLM-Wiki Stale Review | 周日 09:40 | stale Top20 复核清单 |
+| LLM-Wiki Weekly Summary | 周日 09:50 | 周报（任务结果/健康变化/待办清单） |
 | Mnemon Backup | 每日 10:30 | mnemon 快照（独立组件，不由本仓库安装） |
 
 ## 管线命令
@@ -149,10 +150,15 @@ node ~/.dsh/bin/profile-distill.mjs --since 30d    # 复核 → 候选 → USER.
 | `LLM_WIKI_LLM_MODELS` | `glm-4-flash-250414,glm-4.7-flash,THUDM/GLM-4-9B-0414` | 抽取链（免费） |
 | `LLM_WIKI_REVIEW_MODELS` | `deepseek-flash` | 复核链（官网） |
 | `LLM_WIKI_REVIEW_ENDPOINT` | `https://api.deepseek.com/v1` | 官网端点 |
-| `LLM_WIKI_REPORTS` | `D:\DB\DSH\reports` | 候选/清单/健康输出目录 |
+| `LLM_WIKI_REPORTS` | `D:\DB\DSH\reports` | 候选/清单/健康/周报输出目录 |
 | `PROFILE_MAX_ADD` | `12` | 单批候选上限 |
 | `LLM_WIKI_COMPILE_HINT` | 开 | 设 `off` 关闭会话编译提示 |
 | `LLM_WIKI_RRF_K / _WB / _WM / TITLE_BOOST` | `5 / 1.0 / 0.5 / 4` | 融合检索调参 |
+
+## 告警与周报
+
+- 健康快照发现异常（同步页骤降 / stale 激增 / lint 激增 / 探针命中 <60%）时写 `reports/health/ALERT.md` 并返回码 2；任务包装据此弹窗。异常消失后自动消警。
+- 周报：`reports/weekly/LATEST.md`（每周一页：任务结果、7 条健康变化、待处理清单）。
 
 ## 质量门槛
 

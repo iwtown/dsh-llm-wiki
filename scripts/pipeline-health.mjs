@@ -35,4 +35,33 @@ try {
     fs.writeFileSync(path.join(OUT,"health-"+TODAY.slice(0,7)+".md"),md.join("\n")+"\n","utf8");
   }
 } catch {}
+// ── 异常判定 → ALERT ──
+const anomalies = [];
+{
+  const lines = read(csv).trim().split(/\r?\n/);
+  const head = (lines[0] || "").split(",");
+  const rows = lines.slice(1).map(l => l.split(","));
+  const cur = rows[rows.length - 1] || [], prev = rows.length > 1 ? rows[rows.length - 2] : null;
+  const idx = k => head.indexOf(k);
+  const val = (r, k) => idx(k) >= 0 ? Number(r[idx(k)]) : NaN;
+  if (prev) {
+    if (val(cur, "syncPages") < val(prev, "syncPages") - 5) anomalies.push("syncPages 下降 (" + val(prev, "syncPages") + " → " + val(cur, "syncPages") + ")");
+    if (val(cur, "stale") > val(prev, "stale") + 30) anomalies.push("stale 增加 (" + val(prev, "stale") + " → " + val(cur, "stale") + ")");
+    if (val(cur, "lintIssues") > val(prev, "lintIssues") + 20) anomalies.push("lint 问题增加 (" + val(prev, "lintIssues") + " → " + val(cur, "lintIssues") + ")");
+  }
+  const hitStr = String((rows[rows.length - 1] || [])[idx("probeHit")] || "");
+  const [hv, hn] = hitStr.split("/").map(Number);
+  if (hn && hv / hn < 0.6) anomalies.push("召回探针下降 (" + hitStr + ")");
+  if (process.env.LLM_WIKI_FORCE_ALERT === "1") anomalies.push("强制测试告警");
+}
+const alertFile = path.join(OUT, "ALERT.md");
+if (anomalies.length) {
+  fs.mkdirSync(OUT, { recursive: true });
+  fs.writeFileSync(alertFile, "# LLM-Wiki ALERT " + TODAY + "\n\n- " + anomalies.join("\n- ") + "\n\n> 查看 reports/health/health-" + TODAY.slice(0,7) + ".csv 与 ~/.dsh/llm-wiki/*.log\n", "utf8");
+  fs.appendFileSync(path.join(OUT, "alerts.log"), TODAY + " " + anomalies.join("; ") + "\n");
+  process.exitCode = 2;
+} else if (fs.existsSync(alertFile)) {
+  try { fs.renameSync(alertFile, path.join(OUT, "ALERT.resolved.md")); } catch {}
+  console.log(JSON.stringify({ resolved: true }));
+}
 console.log(JSON.stringify({date:TODAY,pages:pages.length,archived,compiled,rawSessions:raws.length,stale,syncPages,syncChunks,userEntries,userBytes,candCount,probeHit:hit+"/"+probes.length,csv}));

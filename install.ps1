@@ -20,13 +20,14 @@ $ProfileDir = Join-Path (Join-Path $DshHome 'profiles') $ProfileName
 $Bin = Join-Path $DshHome 'bin'
 $LogDir = Join-Path $DshHome 'llm-wiki'
 $Reports = if ($env:LLM_WIKI_REPORTS) { $env:LLM_WIKI_REPORTS } else { 'D:\DB\DSH\reports' }
-$Scripts = @('llm-wiki-pipeline.mjs','wiki-retrieval.mjs','wiki-router.mjs','profile-extract.mjs','profile-distill.mjs','session-compile-candidates.mjs','stale-review.mjs','pipeline-health.mjs','embed-proxy.mjs')
-$Wrappers = @('llm-wiki-cron.cmd','profile-distill-cron.cmd','compile-candidates.cmd','stale-review.cmd')
+$Scripts = @('llm-wiki-pipeline.mjs','wiki-retrieval.mjs','wiki-router.mjs','profile-extract.mjs','profile-distill.mjs','session-compile-candidates.mjs','stale-review.mjs','pipeline-health.mjs','weekly-summary.mjs','embed-proxy.mjs')
+$Wrappers = @('llm-wiki-cron.cmd','profile-distill-cron.cmd','compile-candidates.cmd','stale-review.cmd','weekly-summary.cmd')
 $T1 = $TaskPrefix + 'LLM-Wiki Pipeline'
 $T2 = $TaskPrefix + 'Profile Distill'
 $T3 = $TaskPrefix + 'LLM-Wiki Compile Candidates'
 $T4 = $TaskPrefix + 'LLM-Wiki Stale Review'
-$Tasks = @($T1,$T2,$T3,$T4)
+$T5 = $TaskPrefix + 'LLM-Wiki Weekly Summary'
+$Tasks = @($T1,$T2,$T3,$T4,$T5)
 function Remove-IfExists($path) { if (Test-Path $path) { Remove-Item $path -Recurse -Force } }
 if ($Uninstall) {
   Write-Host '==> Uninstalling dsh-llm-wiki'
@@ -66,6 +67,7 @@ if (-not $NoSchedule) {
     $lines = @('@echo off', ('echo [%DATE% %TIME%] start >> ' + $q + $log + $q))
     foreach ($c in $cmds) { $lines += ($c + ' >> ' + $q + $log + $q + ' 2>&1') }
     $lines += ('echo [%DATE% %TIME%] exit=%ERRORLEVEL% >> ' + $q + $log + $q)
+    $lines += 'if errorlevel 1 start "" mshta "javascript:alert(''LLM-Wiki: task failed or health alert. See reports/health/ALERT.md'');close()"'
     $path = Join-Path $Bin ($name + '.cmd')
     Set-Content -Path $path -Value $lines -Encoding ascii
     return $path
@@ -80,7 +82,9 @@ if (-not $NoSchedule) {
   schtasks /Create /TN $T3 /TR ($q + $w3 + $q) /SC WEEKLY /D SUN /ST 09:20 /F | Out-Null
   $w4 = New-Wrapper 'stale-review' @($q + $node + $q + ' ' + $q + (Join-Path $Bin 'stale-review.mjs') + $q + ' --limit 20 --out ' + $q + $Reports + $q)
   schtasks /Create /TN $T4 /TR ($q + $w4 + $q) /SC WEEKLY /D SUN /ST 09:40 /F | Out-Null
-  Write-Host '    4 tasks created (Pipeline 10:00, Profile Sun 09:00, Compile Sun 09:20, Stale Sun 09:40)'
+  $w5 = New-Wrapper 'weekly-summary' @($q + $node + $q + ' ' + $q + (Join-Path $Bin 'weekly-summary.mjs') + $q)
+  schtasks /Create /TN $T5 /TR ($q + $w5 + $q) /SC WEEKLY /D SUN /ST 09:50 /F | Out-Null
+  Write-Host '    5 tasks created (Pipeline 10:00, Profile 09:00, Compile 09:20, Stale 09:40, Weekly 09:50)'
 }
 Write-Host ''
 Write-Host 'Done.'

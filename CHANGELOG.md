@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 — 2026-10-24
+
+- 新增异常告警：健康快照判定异常写 `reports/health/ALERT.md`，任务失败/告警时弹窗；正常时自动消警。
+- 新增周报：`weekly-summary.mjs`，周日 09:50 生成 `reports/weekly/weekly-<date>.md` 与 `LATEST.md`。
+- 安装脚本增加第 5 个任务与告警包装；`pipeline-health.mjs` 路径全部可用环境变量覆盖（无个人路径）。
+
 ## 0.9.0 — 2026-10-24
 
 ### 新增
