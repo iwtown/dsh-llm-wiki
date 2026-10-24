@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2 — 2026-10-24
+
+- 画像决策评测从 8 扩到 **12 用例**：更新变体、unclassified、ORPHAN、单会话阈值。
+- 修复 NOOP 过宽：新增“新条件”识别（审核/之后/至少/必须…），带条件的细化不再被判覆盖。
+- README 增加 CI badge。
+
 ## 0.10.1 — 2026-10-24
 
 - 新增 GitHub Actions `eval-profile`：push/PR 自动跑语法检查 + 8 用例决策评测，强制 100%。

@@ -23,6 +23,10 @@ const cases = [
   { id: "abstain-noise", rules: [], evidence: [{ type: "explicit_instruction", rule: "帮我搜蓝牙耳机", quote: "帮我搜蓝牙耳机" }, { type: "explicit_instruction", rule: "检查一下端口", quote: "检查一下端口" }], expect: { count: 0 } },
   { id: "conflict-factual", rules: ["模型只用免费 ｜ 证据 会话 ｜ 置信 high ｜ 有效期 2027-01-01 ｜ 状态 active"], evidence: [{ type: "explicit_correction", rule: "必须用付费模型", quote: "必须用付费模型", polarity: "positive" }], expect: { decision: "CONFLICT" } },
   { id: "expire", rules: ["旧规则 ｜ 置信 low ｜ 有效期 2020-01-01 ｜ 状态 active"], evidence: [], expect: { decision: "EXPIRE" } },
+  { id: "update-variant", rules: ["先给方案再执行 ｜ 证据 会话 ｜ 置信 high ｜ 有效期 2027-01-01 ｜ 状态 active"], evidence: [{ type: "explicit_correction", rule: "先给方案，审核后再动手", quote: "先给方案审核后再动手", polarity: "positive" }], expect: { decisionIn: ["UPDATE", "ADD"] } },
+  { id: "unclassified", rules: [], evidence: [{ type: "explicit_correction", rule: "我喜欢蓝色", quote: "我喜欢蓝色", polarity: "positive" }], expect: { slot: "unclassified" } },
+  { id: "orphan", rules: ["无证据规则 ｜ 置信 high ｜ 有效期 2027-01-01 ｜ 状态 active"], evidence: [], expect: { decision: "ORPHAN" } },
+  { id: "threshold-single", rules: [], evidence: [{ type: "explicit_instruction", rule: "以后先给结论再解释", quote: "以后先给结论", polarity: "positive" }], expect: { count: 0 } },
   { id: "add-slot", rules: [], evidence: [{ type: "explicit_correction", rule: "先给结论再解释", quote: "以后先给结论", polarity: "positive" }], expect: { decision: "ADD", slot: "comm.answer_first" } }
 ];
 const results = [];

@@ -1,5 +1,7 @@
 # dsh-llm-wiki
 
+[![eval-profile](https://github.com/iwtown/dsh-llm-wiki/actions/workflows/eval.yml/badge.svg)](https://github.com/iwtown/dsh-llm-wiki/actions/workflows/eval.yml)
+
 > 让 Agent 拥有一个**会自己长大、也会自己变老**的知识库。
 > Karpathy LLM Wiki 模式 × DeepSeek Harness：模型写页、管线维护、记忆体召回、质量闭环。
 

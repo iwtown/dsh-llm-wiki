@@ -299,6 +299,10 @@ function sameObject(a, b) {
   const A = String(a).match(CORE_OBJECT) || [], B = String(b).match(CORE_OBJECT) || [];
   return A.some(x => B.includes(x));
 }
+function addsCondition(rule, existing) {
+  const cues = ['审核', '之后', '然后', '同时', '至少', '不超过', '超过', '必须', '只', '仅', '再'];
+  return cues.some(c => String(rule).includes(c) && !String(existing).includes(c));
+}
 function coveredBy(rule, existing) {
   const bigrams = s => { const t = new Set(); for (let i = 0; i < s.length - 1; i++) t.add(s.slice(i, i + 2)); return t; };
   const a = bigrams(norm(rule)), b = bigrams(norm(existing));
@@ -340,7 +344,7 @@ for (const g of mergedGroups.values()) {
   if (matchUser) decision = "NOOP";
   else if (action === "supersede") decision = "CONFLICT";
   else if (action === "refine" || action === "refresh") decision = "UPDATE";
-  if (decision !== "NOOP" && decision !== "CONFLICT" && current.some(c => coveredBy(g.rule, c) || (POL(c) === POL(g.rule) && sameObject(g.rule, c) && sharedBigrams(g.rule, c) >= 2))) decision = "NOOP";
+  if (decision !== "NOOP" && decision !== "CONFLICT" && current.some(c => (coveredBy(g.rule, c) && !addsCondition(g.rule, c)) || (POL(c) === POL(g.rule) && sameObject(g.rule, c) && sharedBigrams(g.rule, c) >= 2 && !addsCondition(g.rule, c)))) decision = "NOOP";
   const conflictType = decision === "CONFLICT" ? classifyConflict(conflictsWith, g.rule) : null;
   candidates.push({ kind: "evidence-v3", action, decision, slot, conflictType, text: g.rule.slice(0, 70), type: g.type, confidence: g.confidence, count, lastDate,
     conflictsWith, profileRule: matchProf ? matchProf.rule : "", quotes: g.quotes });
